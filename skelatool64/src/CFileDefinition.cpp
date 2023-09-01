@@ -51,8 +51,11 @@ unsigned convertByteRange(float value) {
     }
 }
 
- ErrorResult VertexBufferDefinition::Generate(float scale, aiQuaternion rotate, std::unique_ptr<FileDefinition>& output, const std::string& fileSuffix) {
+ ErrorResult VertexBufferDefinition::Generate(float fixedPointScale, float modelScale, aiQuaternion rotate, std::unique_ptr<FileDefinition>& output, const std::string& fileSuffix, const PixelRGBAu8& defaultVertexColor) {
     std::unique_ptr<StructureDataChunk> dataChunk(new StructureDataChunk());
+
+    // aiQuaternion rotateInverse = rotate;
+    // rotateInverse.Conjugate();
     
     for (unsigned int i = 0; i < mTargetMesh->mMesh->mNumVertices; ++i) {
         std::unique_ptr<StructureDataChunk> vertexWrapper(new StructureDataChunk());
@@ -61,13 +64,11 @@ unsigned convertByteRange(float value) {
 
         aiVector3D pos = mTargetMesh->mMesh->mVertices[i];
 
-        if (mTargetMesh->mPointInverseTransform[i]) {
-            pos = (*mTargetMesh->mPointInverseTransform[i]) * pos;
-        } else {
-            pos = rotate.Rotate(pos);
+        if (mTargetMesh->mPointInverseTransform.size()) {
+            pos = mTargetMesh->mPointInverseTransform[i] * pos;
         }
 
-        pos = pos * scale;
+        pos = pos * fixedPointScale;
 
         short converted;
 
@@ -112,39 +113,79 @@ unsigned convertByteRange(float value) {
 
         switch (mVertexType) {
         case VertexType::PosUVNormal:
-            if (mTargetMesh->mMesh->HasNormals()) {
-                aiVector3D normal = mTargetMesh->mMesh->mNormals[i];
+        case VertexType::POSUVTangent:
+        case VertexType::POSUVMinusTangent:
+        case VertexType::POSUVCotangent:
+        case VertexType::POSUVMinusCotangent:
+        {
+            aiVector3D normal;
 
-                if (mTargetMesh->mPointInverseTransform[i]) {
-                    normal = (*mTargetMesh->mNormalInverseTransform[i]) * normal;
-                    normal.Normalize();
-                } else {
-                    normal = rotate.Rotate(normal);
+            switch (mVertexType) {
+            case VertexType::PosUVNormal:
+                if (mTargetMesh->mMesh->HasNormals()) {
+                    normal = mTargetMesh->mMesh->mNormals[i];
                 }
-
-                vertexNormal->AddPrimitive(convertNormalizedRange(normal.x));
-                vertexNormal->AddPrimitive(convertNormalizedRange(normal.y));
-                vertexNormal->AddPrimitive(convertNormalizedRange(normal.z));
-                vertexNormal->AddPrimitive(255);
-            } else {
-                vertexNormal->AddPrimitive(0);
-                vertexNormal->AddPrimitive(0);
-                vertexNormal->AddPrimitive(0);
-                vertexNormal->AddPrimitive(255);
+                break;
+            case VertexType::POSUVTangent:
+                if (mTargetMesh->mMesh->mTangents) {
+                    normal = mTargetMesh->mMesh->mTangents[i];
+                }
+                break;
+            case VertexType::POSUVMinusTangent:
+                if (mTargetMesh->mMesh->mTangents) {
+                    normal = -mTargetMesh->mMesh->mTangents[i];
+                }
+                break;
+            case VertexType::POSUVCotangent:
+                if (mTargetMesh->mMesh->mBitangents) {
+                    normal = mTargetMesh->mMesh->mBitangents[i];
+                }
+                break;
+            case VertexType::POSUVMinusCotangent:
+                if (mTargetMesh->mMesh->mBitangents) {
+                    normal = -mTargetMesh->mMesh->mBitangents[i];
+                }
+                break;
+                default:
+                break;
             }
+
+            if (mTargetMesh->mPointInverseTransform.size()) {
+                normal = mTargetMesh->mNormalInverseTransform[i] * normal;
+                normal.NormalizeSafe();
+            } else {
+                normal = rotate.Rotate(normal);
+            }
+
+            float a = 1.0f;
+
+            if (mTargetMesh->mMesh->mColors[1] != nullptr) {
+                a = mTargetMesh->mMesh->mColors[1][i].r;
+            }
+
+            vertexNormal->AddPrimitive(convertNormalizedRange(normal.x));
+            vertexNormal->AddPrimitive(convertNormalizedRange(normal.y));
+            vertexNormal->AddPrimitive(convertNormalizedRange(normal.z));
+            vertexNormal->AddPrimitive(convertByteRange(a));
             break;
+        }
         case VertexType::PosUVColor:
             if (mTargetMesh->mMesh->mColors[0] != nullptr) {
                 aiColor4D color = mTargetMesh->mMesh->mColors[0][i];
-                vertexNormal->AddPrimitive(color.r);
-                vertexNormal->AddPrimitive(color.g);
-                vertexNormal->AddPrimitive(color.b);
-                vertexNormal->AddPrimitive(color.a);
+                
+                if (mTargetMesh->mMesh->mColors[1] != nullptr) {
+                    color.a = mTargetMesh->mMesh->mColors[1][i].r;
+                }
+
+                vertexNormal->AddPrimitive(convertByteRange(color.r));
+                vertexNormal->AddPrimitive(convertByteRange(color.g));
+                vertexNormal->AddPrimitive(convertByteRange(color.b));
+                vertexNormal->AddPrimitive(convertByteRange(color.a));
             } else {
-                vertexNormal->AddPrimitive(0);
-                vertexNormal->AddPrimitive(0);
-                vertexNormal->AddPrimitive(0);
-                vertexNormal->AddPrimitive(255);
+                vertexNormal->AddPrimitive((int)defaultVertexColor.r);
+                vertexNormal->AddPrimitive((int)defaultVertexColor.g);
+                vertexNormal->AddPrimitive((int)defaultVertexColor.b);
+                vertexNormal->AddPrimitive((int)defaultVertexColor.a);
             }
             break;
         }
@@ -160,8 +201,9 @@ unsigned convertByteRange(float value) {
     return ErrorResult();
 }
 
-CFileDefinition::CFileDefinition(std::string prefix, float modelScale, aiQuaternion modelRotate): 
+CFileDefinition::CFileDefinition(std::string prefix, float fixedPointScale, float modelScale, aiQuaternion modelRotate): 
     mPrefix(prefix),
+    mFixedPointScale(fixedPointScale),
     mModelScale(modelScale),
     mModelRotate(modelRotate) {
 
@@ -186,7 +228,11 @@ void CFileDefinition::AddMacro(const std::string& name, const std::string& value
     mMacros.push_back(name + " " + value);
 }
 
-std::string CFileDefinition::GetVertexBuffer(std::shared_ptr<ExtendedMesh> mesh, VertexType vertexType, int textureWidth, int textureHeight, const std::string& modelSuffix) {
+void CFileDefinition::AddHeader(const std::string& name) {
+    mHeaders.insert(name);
+}
+
+std::string CFileDefinition::GetVertexBuffer(std::shared_ptr<ExtendedMesh> mesh, VertexType vertexType, int textureWidth, int textureHeight, const std::string& modelSuffix, const PixelRGBAu8& defaultVertexColor) {
     for (auto existing = mVertexBuffers.begin(); existing != mVertexBuffers.end(); ++existing) {
         if (existing->second.mTargetMesh == mesh && existing->second.mVertexType == vertexType) {
             return existing->first;
@@ -208,6 +254,19 @@ std::string CFileDefinition::GetVertexBuffer(std::shared_ptr<ExtendedMesh> mesh,
         case VertexType::PosUVNormal:
             requestedName += "_normal";
             break;
+        case VertexType::POSUVTangent:
+            requestedName += "_tangent";
+            break;
+        case VertexType::POSUVMinusTangent:
+            requestedName += "_ntangent";
+            break;
+        case VertexType::POSUVCotangent:
+            requestedName += "_bitangent";
+            break;
+        case VertexType::POSUVMinusCotangent:
+            requestedName += "_nbitangent";
+            break;
+
     }
 
 
@@ -225,7 +284,7 @@ std::string CFileDefinition::GetVertexBuffer(std::shared_ptr<ExtendedMesh> mesh,
 
     std::unique_ptr<FileDefinition> vtxDef;
 
-    ErrorResult result = mVertexBuffers.find(name)->second.Generate(mModelScale, mModelRotate, vtxDef, modelSuffix);
+    ErrorResult result = mVertexBuffers.find(name)->second.Generate(mFixedPointScale, mModelScale, mModelRotate, vtxDef, modelSuffix, defaultVertexColor);
 
     if (result.HasError()) {
         std::cerr << "Error generating vertex buffer " << name << " error: " << result.GetMessage() << std::endl;
@@ -252,7 +311,7 @@ std::string CFileDefinition::GetCullingBuffer(const std::string& name, const aiV
     mesh->mVertices[7] = aiVector3D(max.x, max.y, max.z);
 
     BoneHierarchy boneHierarchy;
-    return GetVertexBuffer(std::shared_ptr<ExtendedMesh>(new ExtendedMesh(mesh, boneHierarchy)), VertexType::PosUVNormal, 0, 0, modelSuffix);
+    return GetVertexBuffer(std::shared_ptr<ExtendedMesh>(new ExtendedMesh(mesh, boneHierarchy)), VertexType::PosUVNormal, 0, 0, modelSuffix, PixelRGBAu8());
 }
 
 
@@ -263,8 +322,8 @@ std::string CFileDefinition::GetUniqueName(std::string requestedName) {
     int index = 1;
     
     while (mUsedNames.find(result) != mUsedNames.end()) {
-        char strBuffer[8];
-        snprintf(strBuffer, 8, "_%d", index);
+        char strBuffer[12];
+        snprintf(strBuffer, 12, "_%d", index);
         result = mPrefix + "_" + requestedName + strBuffer;
         makeCCompatible(result);
         ++index;
@@ -322,7 +381,7 @@ void CFileDefinition::Generate(std::ostream& output, const std::string& location
 }
 
 void CFileDefinition::GenerateHeader(std::ostream& output, const std::string& headerFileName) {
-    std::string infdef = std::string("__") + headerFileName + "_H__";
+    std::string infdef = std::string("__SKOUT_") + headerFileName + "_H__";
 
     makeCCompatible(infdef);
     std::transform(infdef.begin(), infdef.end(), infdef.begin(), ::toupper);
@@ -331,7 +390,7 @@ void CFileDefinition::GenerateHeader(std::ostream& output, const std::string& he
     output << "#define " << infdef << std::endl;
     output << std::endl;
 
-    std::set<std::string> includes;
+    std::set<std::string> includes = mHeaders;
 
     for (auto it = mDefinitions.begin(); it != mDefinitions.end(); ++it) {
         auto headers = (*it)->GetTypeHeaders();
@@ -402,4 +461,8 @@ std::shared_ptr<ExtendedMesh> CFileDefinition::GetExtendedMesh(aiMesh* mesh) {
     mMeshes[mesh] = result;
 
     return result;
+}
+
+BoneHierarchy& CFileDefinition::GetBoneHierarchy() {
+    return mBoneHierarchy;
 }

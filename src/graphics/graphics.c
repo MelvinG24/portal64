@@ -7,6 +7,22 @@ struct GraphicsTask gGraphicsTasks[2];
 extern OSMesgQueue  gfxFrameMsgQ;
 extern OSMesgQueue	*schedulerCommandQueue;
 
+void* gLevelSegment;
+
+#if PORTAL64_WITH_GFX_VALIDATOR
+#include "../../gfxvalidator/validator.h"
+#endif
+
+#if PORTAL64_WITH_DEBUGGER
+#include "../../debugger/debugger.h"
+#include "../../debugger/serial.h"
+
+void graphicsOutputMessageToDebugger(char* message, unsigned len) {
+    gdbSendMessage(GDBDataTypeText, message, len);
+}
+
+#endif
+
 #define RDP_OUTPUT_SIZE 0x4000
 
 u64* rdpOutput;
@@ -37,6 +53,7 @@ void graphicsCreateTask(struct GraphicsTask* targetTask, GraphicsCallback callba
 
     renderStateInit(renderState, targetTask->framebuffer, zbuffer);
     gSPSegment(renderState->dl++, 0, 0);
+    gSPSegment(renderState->dl++, LEVEL_SEGMENT, gLevelSegment);
 
     gSPDisplayList(renderState->dl++, setup_rspstate);
     if (firsttime) {
@@ -52,8 +69,10 @@ void graphicsCreateTask(struct GraphicsTask* targetTask, GraphicsCallback callba
     gDPSetFillColor(renderState->dl++, (GPACK_ZDZ(G_MAXFBZ,0) << 16 | GPACK_ZDZ(G_MAXFBZ,0)));
     gDPFillRectangle(renderState->dl++, 0, 0, SCREEN_WD-1, SCREEN_HT-1);
 	
+    
     gDPPipeSync(renderState->dl++);
     gDPSetColorImage(renderState->dl++, G_IM_FMT_RGBA, G_IM_SIZ_16b, SCREEN_WD, osVirtualToPhysical(targetTask->framebuffer));
+
     gDPPipeSync(renderState->dl++);
     gDPSetCycleType(renderState->dl++, G_CYC_1CYCLE); 
 
@@ -66,8 +85,6 @@ void graphicsCreateTask(struct GraphicsTask* targetTask, GraphicsCallback callba
     gSPEndDisplayList(renderState->dl++);
 
     renderStateFlushCache(renderState);
-
-
 
     OSScTask *scTask = &targetTask->task;
 
@@ -99,6 +116,19 @@ void graphicsCreateTask(struct GraphicsTask* targetTask, GraphicsCallback callba
     scTask->msgQ = &gfxFrameMsgQ;
     scTask->next = 0;
     scTask->state = 0;
+
+#if PORTAL64_WITH_GFX_VALIDATOR
+#if PORTAL64_WITH_DEBUGGER
+    struct GFXValidationResult validationResult;
+    zeroMemory(&validationResult, sizeof(struct GFXValidationResult));
+
+    if (gfxValidate(&scTask->list, renderStateMaxDLCount(renderState), &validationResult) != GFXValidatorErrorNone) {
+        gfxGenerateReadableMessage(&validationResult, graphicsOutputMessageToDebugger);
+        gdbBreak();
+    }
+
+#endif // PORTAL64_WITH_DEBUGGER
+#endif // PORTAL64_WITH_GFX_VALIDATOR
 
     osSendMesg(schedulerCommandQueue, (OSMesg)scTask, OS_MESG_BLOCK);
 }

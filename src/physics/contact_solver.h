@@ -11,11 +11,13 @@ struct VelocityState
 	struct Vector3 v;
 };
 
-struct ContactState
+struct ContactPoint
 {
 	int id;
-	struct Vector3 ra;					// Vector from C.O.M to contact position
-	struct Vector3 rb;					// Vector from C.O.M to contact position
+	struct Vector3 contactALocal;					// Vector from C.O.M to contact position
+	struct Vector3 contactBLocal;					// Vector from C.O.M to contact position
+	struct Vector3 contactAWorld;					// Vector from C.O.M to contact position
+	struct Vector3 contactBWorld;					// Vector from C.O.M to contact position
 	float penetration;			// Depth of penetration from collision
 	float normalImpulse;			// Accumulated normal impulse
 	float tangentImpulse[ 2 ];	// Accumulated friction impulse
@@ -24,30 +26,29 @@ struct ContactState
 	float tangentMass[ 2 ];		// Tangent constraint mass
 };
 
-#define MAX_CONTACTS_PER_MANIFOLD	8
+#define MAX_CONTACTS_PER_MANIFOLD	4
 
 #define NEGATIVE_PENETRATION_BIAS   0.00001f
 
-struct ContactConstraintState
-{
-	struct ContactState contacts[ MAX_CONTACTS_PER_MANIFOLD ];
+struct ContactManifold {
+	struct ContactPoint contacts[ MAX_CONTACTS_PER_MANIFOLD ];
 	short contactCount;
-	short didContactLastFrame;
 	struct Vector3 tangentVectors[ 2 ];	// Tangent vectors
 	struct Vector3 normal;				// From A to B
 	float restitution;
 	float friction;
 	struct CollisionObject* shapeA;
 	struct CollisionObject* shapeB;
-	struct ContactConstraintState* next;
+	struct ContactManifold* next;
 };
 
-#define MAX_CONTACT_COUNT	8
+#define MAX_CONTACT_COUNT	20
 
 struct ContactSolver {
-    struct ContactConstraintState contacts[MAX_CONTACT_COUNT];
-	struct ContactConstraintState* unusedContacts;
-	struct ContactConstraintState* activeContacts;
+    struct ContactManifold contacts[MAX_CONTACT_COUNT];
+	struct ContactManifold* unusedContacts;
+	struct ContactManifold* activeContacts;
+    struct PointConstraint* firstPointConstraint;
 	int contactCapacity;
 	short currentContactFrame;
 };
@@ -58,13 +59,19 @@ void contactSolverInit(struct ContactSolver* contactSolver);
 
 void contactSolverSolve(struct ContactSolver* solver);
 
-struct ContactConstraintState* contactSolverPeekContact(struct ContactSolver* solver, struct CollisionObject* shapeA, struct CollisionObject* shapeB);
+struct ContactManifold* contactSolverGetContactManifold(struct ContactSolver* solver, struct CollisionObject* shapeA, struct CollisionObject* shapeB);
 
-void contactSolverRemoveContact(struct ContactSolver* solver, struct ContactConstraintState* toRemove);
+struct ContactManifold* contactSolverNextManifold(struct ContactSolver* solver, struct CollisionObject* forObject, struct ContactManifold* current);
 
-struct ContactState* contactSolverGetContact(struct ContactConstraintState* contact, int id);
+void contactSolverRemoveUnusedContacts(struct ContactSolver* contactSolver);
+void contactSolverCheckPortalContacts(struct ContactSolver* contactSolver, struct CollisionObject* objectWithNewPortal);
+void contactSolverCleanupManifold(struct ContactManifold* manifold);
 
-int contactSolverAssign(struct ContactConstraintState* into, struct ContactConstraintState* from, int filterPortalContacts);
+float contactPenetration(struct ContactManifold* contact);
+void contactAdjustPenetration(struct ContactManifold* contact, float amount);
+
+void contactSolverAddPointConstraint(struct ContactSolver* solver, struct PointConstraint* constraint);
+void contactSolverRemovePointConstraint(struct ContactSolver* solver, struct PointConstraint* constraint);
 
 #endif
 

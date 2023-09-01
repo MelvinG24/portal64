@@ -13,7 +13,7 @@ bool bottomRightMost(const aiVector3D& a, const aiVector3D& b) {
         return a.y < b.y;
     }
 
-    return a.z - b.z;
+    return a.z < b.z;
 }
 
 const aiVector3D* findMostOppositeEdge(const aiVector3D& fromEdge, const std::vector<aiVector3D>& edges) {
@@ -22,7 +22,7 @@ const aiVector3D* findMostOppositeEdge(const aiVector3D& fromEdge, const std::ve
     }).base();
 }
 
-CollisionQuad::CollisionQuad(aiMesh* mesh, const aiMatrix4x4& transform) {
+CollisionQuad::CollisionQuad(aiMesh* mesh, const aiMatrix4x4& transform): thickness(0.0f) {
     if (mesh->mVertices) {
         std::vector<aiVector3D> transformedPoints;
 
@@ -104,7 +104,7 @@ CollisionQuad::CollisionQuad(aiMesh* mesh, const aiMatrix4x4& transform) {
     }
 }
 
-std::unique_ptr<DataChunk> CollisionQuad::Generate() {
+std::unique_ptr<DataChunk> CollisionQuad::Generate() const {
     std::unique_ptr<StructureDataChunk> result(new StructureDataChunk());
 
     result->Add(std::unique_ptr<DataChunk>(new StructureDataChunk(corner)));
@@ -118,19 +118,9 @@ std::unique_ptr<DataChunk> CollisionQuad::Generate() {
     plane->AddPrimitive(-(corner * normal));
     result->Add(std::move(plane));
 
-    result->AddPrimitive(0xF);
+    result->AddPrimitive(thickness);
 
     return result;
-}
-
-#define FIXED_POINT_PRECISION   8
-#define FIXED_POINT_SCALAR      (1 << FIXED_POINT_PRECISION)
-
-void CollisionQuad::ToLocalCoords(const aiVector3D& input, short& outX, short& outY) {
-    aiVector3D relative = input - corner;
-
-    outX = (short)(relative * edgeA * FIXED_POINT_SCALAR + 0.5f);
-    outY = (short)(relative * edgeB * FIXED_POINT_SCALAR + 0.5f);
 }
 
 #define INSIDE_NORMAL_TOLERANCE 0.1f
@@ -179,17 +169,28 @@ aiAABB CollisionQuad::BoundingBox() const {
     result.mMin = corner;
     result.mMax = corner;
 
-    aiVector3D point = corner + edgeA * edgeALength;
-    result.mMin = min(result.mMin, point);
-    result.mMax = max(result.mMax, point);
+    for (int x = 0; x < 2; ++x) {
+        for (int y = 0; y < 2; ++y) {
+            for (int z = 0; z < 2; ++z) {
+                aiVector3D point = corner;
 
-    point = point + edgeB * edgeBLength;
-    result.mMin = min(result.mMin, point);
-    result.mMax = max(result.mMax, point);
+                if (x) {
+                    point = point + edgeA * edgeALength;
+                }
 
-    point = corner + edgeB * edgeBLength;
-    result.mMin = min(result.mMin, point);
-    result.mMax = max(result.mMax, point);
+                if (y) {
+                    point = point + edgeB * edgeBLength;
+                }
+
+                if (z) {
+                    point = point - normal * thickness;
+                }
+                
+                result.mMin = min(result.mMin, point);
+                result.mMax = max(result.mMax, point);
+            }
+        }
+    }
 
     return result;
 }

@@ -62,14 +62,14 @@ bool renderModeGetFlagValue(const std::string& name, int& output) {
 
     it = gCVG_DST_VALUES.find(name);
 
-    if (it != gRenderModeFlags.end()) {
+    if (it != gCVG_DST_VALUES.end()) {
         output = it->second;
         return true;
     }
 
     it = gZMODE_VALUES.find(name);
 
-    if (it != gRenderModeFlags.end()) {
+    if (it != gZMODE_VALUES.end()) {
         output = it->second;
         return true;
     }
@@ -93,7 +93,7 @@ bool renderModeGetBlendModeValue(const std::string& name, int index, int& output
 
     for (int i = 0; i < 4; ++i) {
         if (gBlendModeNames[index][i] == name) {
-            output = i << gBlendModeShift[index];
+            output = i;
             return true;
         }
     }
@@ -110,5 +110,6 @@ const std::string& renderModeGetBlendModeName(int blendMode, int index) {
         index = 3;
     }
 
-    return gBlendModeNames[index][(blendMode >> gBlendModeShift[index]) & 0x3];
+    int dataIndex = (blendMode >> gBlendModeShift[index]) & 0x3;
+    return gBlendModeNames[index][dataIndex];
 }

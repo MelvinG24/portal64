@@ -8,25 +8,37 @@
 #include "./materials/Material.h"
 #include "./materials/MaterialState.h"
 
+#define DEFAULT_MAX_OPTIMIZATION_ITERATIONS 1000
+
 struct DisplayListSettings {
     DisplayListSettings();
     std::string mPrefix;
     int mVertexCacheSize;
     bool mHasTri2;
-    float mGraphicsScale;
-    float mCollisionScale;
+    float mFixedPointScale;
+    float mModelScale;
     int mMaxMatrixDepth;
+    int mMaxOptimizationIterations;
     bool mCanPopMultipleMatrices;
-    unsigned short mTicksPerSecond;
+    float mTicksPerSecond;
     std::map<std::string, std::shared_ptr<Material>> mMaterials;
+    std::string mDefaultMaterialName;
+    std::string mForceMaterialName;
+    std::string mForcePallete;
     MaterialState mDefaultMaterialState;
     aiQuaternion mRotateModel;
     bool mExportAnimation;
     bool mExportGeometry;
     bool mIncludeCulling;
+    bool mBonesAsVertexGroups;
+    bool mTargetCIBuffer;
 
-    aiMatrix4x4 CreateGlobalTransform();
-    aiMatrix4x4 CreateCollisionTransform();
+    aiVector3D mSortDirection;
+
+    aiMatrix4x4 CreateGlobalTransform() const;
+    aiMatrix4x4 CreateCollisionTransform() const;
+
+    bool NeedsTangents() const;
 };
 
 #endif

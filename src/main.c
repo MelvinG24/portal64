@@ -6,17 +6,26 @@
 #include "graphics/graphics.h"
 #include "util/rom.h"
 #include "scene/scene.h"
+#include "menu/main_menu.h"
 #include "util/time.h"
 #include "util/memory.h"
 #include "string.h"
 #include "controls/controller.h"
+#include "controls/controller_actions.h"
 #include "scene/dynamic_scene.h"
 #include "audio/soundplayer.h"
 #include "audio/audio.h"
+#include "scene/portal_surface.h"
+#include "sk64/skelatool_defs.h"
+#include "levels/cutscene_runner.h"
+#include "savefile/savefile.h"
+#include "sk64/skelatool_animator.h"
+#include "util/dynamic_asset_loader.h"
 
 #include "levels/levels.h"
+#include "savefile/checkpoint.h"
 
-#ifdef WITH_DEBUGGER
+#ifdef PORTAL64_WITH_DEBUGGER
 #include "../debugger/debugger.h"
 #endif
 
@@ -44,7 +53,7 @@ OSMesgQueue	*schedulerCommandQueue;
 
 OSPiHandle	*gPiHandle;
 
-void main(void *arg) {
+void boot(void *arg) {
     osInitialize();
 
     gPiHandle = osCartRomInit();
@@ -85,19 +94,59 @@ static void initProc(void* arg) {
 }
 
 struct Scene gScene;
+struct GameMenu gGameMenu;
 
 extern OSMesgQueue dmaMessageQ;
 
 extern char _heapStart[];
 
-#define FRAME_SKIP  0
+extern char _animation_segmentSegmentRomStart[];
+
+typedef void (*InitCallback)(void* data);
+typedef void (*UpdateCallback)(void* data);
+
+struct SceneCallbacks {
+    void* data;
+    InitCallback initCallback;
+    GraphicsCallback graphicsCallback;
+    UpdateCallback updateCallback;
+};
+
+struct SceneCallbacks gTestChamberCallbacks = {
+    .data = &gScene,
+    .initCallback = (InitCallback)&sceneInit,
+    .graphicsCallback = (GraphicsCallback)&sceneRender,
+    .updateCallback = (UpdateCallback)&sceneUpdate,
+};
+
+struct SceneCallbacks gMainMenuCallbacks = {
+    .data = &gGameMenu,
+    .initCallback = (InitCallback)&mainMenuInit,
+    .graphicsCallback = (GraphicsCallback)&mainMenuRender,
+    .updateCallback = (UpdateCallback)&mainMenuUpdate,
+};
+
+struct SceneCallbacks* gSceneCallbacks = &gTestChamberCallbacks;
+
+void levelLoadWithCallbacks(int levelIndex) {
+    if (levelIndex == MAIN_MENU) {
+        levelLoad(0);
+        gSceneCallbacks = &gMainMenuCallbacks;
+    } else {
+        levelLoad(levelIndex);
+        gSceneCallbacks = &gTestChamberCallbacks;
+    }
+}
 
 static void gameProc(void* arg) {
     u8 schedulerMode = OS_VI_NTSC_LPF1;
 
+    int fps = 60;
+
 	switch (osTvType) {
 		case 0: // PAL
 			schedulerMode = HIGH_RES ? OS_VI_PAL_HPF1 : OS_VI_PAL_LPF1;
+            fps = 50;
 			break;
 		case 1: // NTSC
 			schedulerMode = HIGH_RES ? OS_VI_NTSC_HPF1 : OS_VI_NTSC_LPF1;
@@ -125,10 +174,13 @@ static void gameProc(void* arg) {
 			OS_VI_DIVOT_OFF |
 			OS_VI_DITHER_FILTER_OFF);
 
+    osViBlack(1);
+
     u32 pendingGFX = 0;
     u32 drawBufferIndex = 0;
     u8 frameControl = 0;
-    u8 inputIgnore = 6;
+    u8 inputIgnore = 5;
+    u8 drawingEnabled = 0;
 
     u16* memoryEnd = graphicsLayoutScreenBuffers((u16*)PHYS_TO_K0(osMemSize));
 
@@ -139,18 +191,24 @@ static void gameProc(void* arg) {
     heapInit(_heapStart, memoryEnd);
     romInit();
 
-    dynamicSceneInit();
-    contactSolverInit(&gContactSolver);
-    levelLoad(0);
-    sceneInit(&gScene);
-    controllersInit();
-    initAudio();
-    soundPlayerInit();
-#ifdef WITH_DEBUGGER
+#ifdef PORTAL64_WITH_DEBUGGER
     OSThread* debugThreads[2];
     debugThreads[0] = &gameThread;
     gdbInitDebugger(gPiHandle, &dmaMessageQ, debugThreads, 1);
 #endif
+
+    dynamicSceneInit();
+    contactSolverInit(&gContactSolver);
+    portalSurfaceCleanupQueueInit();
+    savefileLoad();
+    levelLoadWithCallbacks(MAIN_MENU);
+    gCurrentTestSubject = 0;
+    cutsceneRunnerReset();
+    controllersInit();
+    initAudio(fps);
+    soundPlayerInit();
+    skSetSegmentLocation(CHARACTER_ANIMATION_SEGMENT, (unsigned)_animation_segmentSegmentRomStart);
+    gSceneCallbacks->initCallback(gSceneCallbacks->data);
 
     while (1) {
         OSScMsg *msg = NULL;
@@ -164,35 +222,60 @@ static void gameProc(void* arg) {
                     break;
                 }
 
-                static int renderSkip = 1;
+                if (levelGetQueued() != NO_QUEUED_LEVEL) {
+                    if (pendingGFX == 0) {
+                        soundPlayerStopAll();
+                        dynamicSceneInit();
+                        contactSolverInit(&gContactSolver);
+                        portalSurfaceRevert(1);
+                        portalSurfaceRevert(0);
+                        portalSurfaceCleanupQueueInit();
+                        heapInit(_heapStart, memoryEnd);
+                        levelLoadWithCallbacks(levelGetQueued());
+                        cutsceneRunnerReset();
+                        dynamicAssetsReset();
+                        gSceneCallbacks->initCallback(gSceneCallbacks->data);
+                    }
 
-                if (pendingGFX < 2 && !renderSkip) {
-                    graphicsCreateTask(&gGraphicsTasks[drawBufferIndex], (GraphicsCallback)sceneRender, &gScene);
+                    break;
+                }
+
+                if (pendingGFX < 2 && drawingEnabled) {
+                    graphicsCreateTask(&gGraphicsTasks[drawBufferIndex], gSceneCallbacks->graphicsCallback, gSceneCallbacks->data);
                     drawBufferIndex = drawBufferIndex ^ 1;
                     ++pendingGFX;
-                } else if (renderSkip) {
-                    --renderSkip;
                 }
 
                 controllersTriggerRead();
+                controllerHandlePlayback();
+                controllerActionRead();
+                skAnimatorSync();
+                
                 if (inputIgnore) {
                     --inputIgnore;
                 } else {
-                    sceneUpdate(&gScene);
+                    gSceneCallbacks->updateCallback(gSceneCallbacks->data);
+                    drawingEnabled = 1;
                 }
                 timeUpdateDelta();
                 soundPlayerUpdate();
+                controllersSavePreviousState();
 
                 break;
 
             case (OS_SC_DONE_MSG):
                 --pendingGFX;
+                portalSurfaceCheckCleanupQueue();
+
+                if (gScene.checkpointState == SceneCheckpointStatePendingRender) {
+                    gScene.checkpointState = SceneCheckpointStateReady;
+                }
                 break;
             case (OS_SC_PRE_NMI_MSG):
                 pendingGFX += 2;
                 break;
             case SIMPLE_CONTROLLER_MSG:
-                controllersUpdate();
+                controllersReadPendingData();
                 break;
         }
     }

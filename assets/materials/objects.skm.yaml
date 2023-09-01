@@ -8,6 +8,7 @@ materials:
       set: [G_LIGHTING, G_SHADE]
     gDPSetCombineMode: 
       color: ["PRIMITIVE", "0", "SHADE", "0"]
+    gDPSetRenderMode: G_RM_OPA_SURF
 
   portal_gun_metal:
     gDPSetPrimColor:
@@ -18,6 +19,7 @@ materials:
       set: [G_LIGHTING, G_SHADE]
     gDPSetCombineMode: 
       color: ["PRIMITIVE", "0", "SHADE", "0"]
+    gDPSetRenderMode: G_RM_OPA_SURF
 
   button_base:
     gDPSetTile:
@@ -27,7 +29,7 @@ materials:
         siz: G_IM_SIZ_16b
         tmem: 256
         s:
-          wrap: false
+          wrap: true
         t:
           wrap: false
     gSPTexture:
@@ -72,3 +74,63 @@ materials:
       set: [G_LIGHTING, G_SHADE]
     gDPSetCombineMode: 
       color: ["SHADE", "0", "PRIMITIVE", "0"]
+
+  solid_white:
+    gDPSetPrimColor:
+      r: 255
+      g: 255
+      b: 255
+    gSPGeometryMode:
+      set: [G_LIGHTING, G_SHADE]
+    gDPSetCombineMode: 
+      color: ["PRIMITIVE", "0", "SHADE", "0"]
+
+  solid_black:
+    gDPSetPrimColor:
+      r: 32
+      g: 32
+      b: 32
+    gSPGeometryMode:
+      set: [G_LIGHTING, G_SHADE]
+    gDPSetCombineMode: 
+      color: ["PRIMITIVE", "0", "SHADE", "0"]
+
+  blue_glow:
+    gDPSetPrimColor:
+      r: 89
+      g: 197
+      b: 240
+    gDPSetCombineMode: 
+      color: ["0", "0", "0", "PRIMITIVE"]
+
+  solid_white_two_sided:
+    gDPSetPrimColor:
+      r: 255
+      g: 255
+      b: 255
+    gSPGeometryMode:
+      set: [G_LIGHTING, G_SHADE]
+      clear: [G_CULL_BACK]
+    gDPSetCombineMode: 
+      color: ["PRIMITIVE", "0", "SHADE", "0"]
+
+  solid_black_two_sided:
+    gDPSetPrimColor:
+      r: 32
+      g: 32
+      b: 32
+    gSPGeometryMode:
+      set: [G_LIGHTING, G_SHADE]
+      clear: [G_CULL_BACK]
+    gDPSetCombineMode: 
+      color: ["PRIMITIVE", "0", "SHADE", "0"]
+
+  blue_glow_two_sided:
+    gDPSetPrimColor:
+      r: 89
+      g: 197
+      b: 240
+    gSPGeometryMode:
+      clear: [G_CULL_BACK]
+    gDPSetCombineMode: 
+      color: ["0", "0", "0", "PRIMITIVE"]

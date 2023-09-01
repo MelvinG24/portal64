@@ -2,8 +2,7 @@
 
 void renderStateInit(struct RenderState* renderState, u16* framebuffer, u16* depthBuffer) {
     renderState->dl = renderState->glist;
-    renderState->currentMemoryChunk = 0;
-    renderState->currentChunkEnd = MAX_DL_LENGTH;
+    renderState->currentMemoryChunk = &renderState->glist[MAX_DL_LENGTH + MAX_RENDER_STATE_MEMORY_CHUNKS];
     renderState->framebuffer = framebuffer;
     renderState->depthBuffer = depthBuffer;
 }
@@ -11,13 +10,16 @@ void renderStateInit(struct RenderState* renderState, u16* framebuffer, u16* dep
 void* renderStateRequestMemory(struct RenderState* renderState, unsigned size) {
     unsigned memorySlots = (size + 7) >> 3;
 
-    if (renderState->currentMemoryChunk + memorySlots <= MAX_RENDER_STATE_MEMORY_CHUNKS) {
-        void* result = &renderState->renderStateMemory[renderState->currentMemoryChunk];
-        renderState->currentMemoryChunk += memorySlots;
-        return result;
+    Gfx* result = renderState->currentMemoryChunk - memorySlots;
+
+    // display list grows up, allocated memory grows down
+    if (result <= renderState->dl) {
+        return 0;
     }
 
-    return 0;
+    renderState->currentMemoryChunk = result;
+
+    return result;
 }
 
 Mtx* renderStateRequestMatrices(struct RenderState* renderState, unsigned count) {
@@ -32,14 +34,20 @@ Vp* renderStateRequestViewport(struct RenderState* renderState) {
     return renderStateRequestMemory(renderState, sizeof(Vp));
 }
 
+Vtx* renderStateRequestVertices(struct RenderState* renderState, unsigned count) {
+    return renderStateRequestMemory(renderState, sizeof(Vtx) * count);
+}
+
+LookAt* renderStateRequestLookAt(struct RenderState* renderState) {
+    return renderStateRequestMemory(renderState, sizeof(LookAt));
+}
+
 void renderStateFlushCache(struct RenderState* renderState) {
     osWritebackDCache(renderState, sizeof(struct RenderState));
 }
 
 Gfx* renderStateAllocateDLChunk(struct RenderState* renderState, unsigned count) {
-    Gfx* result = &renderState->glist[renderState->currentChunkEnd - count];
-    renderState->currentChunkEnd -= count;
-    return result;
+    return renderStateRequestMemory(renderState, sizeof(Gfx) * count);
 }
 
 Gfx* renderStateReplaceDL(struct RenderState* renderState, Gfx* nextDL) {
@@ -68,4 +76,14 @@ Gfx* renderStateEndChunk(struct RenderState* renderState, Gfx* chunkStart) {
     renderState->dl = chunkStart;
 
     return newChunk;
+}
+
+int renderStateMaxDLCount(struct RenderState* renderState) {
+    return renderState->currentMemoryChunk - renderState->glist;
+}
+
+void renderStateInlineBranch(struct RenderState* renderState, Gfx* dl) {
+    while (_SHIFTR(dl->words.w0, 24, 8) != G_ENDDL) {
+        *renderState->dl++ = *dl++;
+    }
 }

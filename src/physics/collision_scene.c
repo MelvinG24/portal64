@@ -1,6 +1,12 @@
 #include "collision_scene.h"
 
 #include "math/mathf.h"
+#include "gjk.h"
+#include "epa.h"
+#include "contact_solver.h"
+#include "../util/memory.h"
+#include "../scene/portal.h"
+#include "../levels/levels.h"
 
 struct CollisionScene gCollisionScene;
 
@@ -13,6 +19,8 @@ void collisionSceneInit(struct CollisionScene* scene, struct CollisionObject* qu
     scene->dynamicObjectCount = 0;
     scene->portalTransforms[0] = NULL;
     scene->portalTransforms[1] = NULL;
+    scene->portalColliderIndex[0] = -1;
+    scene->portalColliderIndex[1] = -1;
 }
 
 int mergeColliderList(short* a, int aCount, short* b, int bCount, short* output) {
@@ -59,7 +67,7 @@ int mergeColliderList(short* a, int aCount, short* b, int bCount, short* output)
 #define GRID_CELL_X(room, worldX) floorf(((worldX) - room->cornerX) * (1.0f / COLLISION_GRID_CELL_SIZE));
 #define GRID_CELL_Z(room, worldZ) floorf(((worldZ) - room->cornerZ) * (1.0f / COLLISION_GRID_CELL_SIZE));
 
-#define GRID_CELL_CONTENTS(room, x, z) (&room->cellContents[(x) * room->spanX + (z)])
+#define GRID_CELL_CONTENTS(room, x, z) (&room->cellContents[(x) * room->spanZ + (z)])
 
 int collisionObjectRoomColliders(struct Room* room, struct Box3D* box, short output[MAX_COLLIDERS]) {
     short tmp[MAX_COLLIDERS];
@@ -97,21 +105,65 @@ int collisionObjectRoomColliders(struct Room* room, struct Box3D* box, short out
     return result;
 }
 
-void collisionObjectCollideWithScene(struct CollisionObject* object, struct CollisionScene* scene, struct ContactSolver* contactSolver) {    
+void collisionObjectCollideMixed(struct CollisionObject* object, struct Vector3* objectPrevPos, struct Box3D* sweptBB, struct CollisionScene* scene, struct ContactSolver* contactSolver) {    
     short colliderIndices[MAX_COLLIDERS];
-    int quadCount = collisionObjectRoomColliders(&scene->world->rooms[object->body->currentRoom], &object->boundingBox, colliderIndices);
+    int quadCount = collisionObjectRoomColliders(&scene->world->rooms[object->body->currentRoom], sweptBB, colliderIndices);
 
     for (int i = 0; i < quadCount; ++i) {
-        collisionObjectCollideWithQuad(object, &scene->quads[colliderIndices[i]], contactSolver);
+        int quadIndex = colliderIndices[i];
+        struct CollisionObject* quad = &scene->quads[quadIndex];
+        int shouldCheckPortals = gCollisionScene.portalColliderIndex[0] == quadIndex || gCollisionScene.portalColliderIndex[1] == quadIndex;
+
+        if (quad->manifoldIds & object->manifoldIds) {
+            collisionObjectCollideWithQuad(object, quad, contactSolver, shouldCheckPortals);
+        } else {
+            collisionObjectCollideWithQuadSwept(object, objectPrevPos, sweptBB, quad, contactSolver, shouldCheckPortals);
+        }
     }
 }
 
-int collisionSceneFilterPortalContacts(struct ContactConstraintState* contact) {
+int collisionObjectCollideShapeCast(struct CollisionObject* object, struct Vector3* offset, struct CollisionScene* scene, struct Vector3* finalLocation) {
+    short colliderIndices[MAX_COLLIDERS];
+
+    struct Box3D sweptBB = object->boundingBox;
+
+    box3DExtendDirection(&sweptBB, offset, &sweptBB);
+
+    int quadCount = collisionObjectRoomColliders(&scene->world->rooms[object->body->currentRoom], &sweptBB, colliderIndices);
+
+    struct Vector3 startingPos = object->body->transform.position;
+
+    vector3Add(&object->body->transform.position, offset, &object->body->transform.position);
+
+    int result = 0;
+
+    for (int i = 0; i < quadCount; ++i) {
+        int quadIndex = colliderIndices[i];
+        struct CollisionObject* quad = &scene->quads[quadIndex];
+        int shouldCheckPortals = gCollisionScene.portalColliderIndex[0] == quadIndex || gCollisionScene.portalColliderIndex[1] == quadIndex;
+
+        struct EpaResult epaResult;
+        struct Vector3 objectEnd;
+        enum SweptCollideResult collideResult = collisionObjectSweptCollide(object, &startingPos, &sweptBB, quad, shouldCheckPortals, &epaResult, &objectEnd);
+
+        if (collideResult == SweptCollideResultHit) {
+            object->body->transform.position = objectEnd;
+            result = 1;
+        }
+    }
+
+    *finalLocation = object->body->transform.position;
+    object->body->transform.position = startingPos;
+
+    return result;
+}
+
+int collisionSceneFilterPortalContacts(struct ContactManifold* contact) {
     int writeIndex = 0;
 
     for (int readIndex = 0; readIndex < contact->contactCount; ++readIndex) {
-        if (collisionSceneIsTouchingPortal(&contact->contacts[readIndex].ra, &contact->normal)) {
-            continue;;
+        if (collisionSceneIsTouchingPortal(&contact->contacts[readIndex].contactALocal, &contact->normal)) {
+            continue;
         }
 
         if (readIndex != writeIndex) {
@@ -126,31 +178,9 @@ int collisionSceneFilterPortalContacts(struct ContactConstraintState* contact) {
     return writeIndex;
 }
 
-void collisionObjectQueryScene(struct CollisionObject* object, struct CollisionScene* scene, void* data, ManifoldCallback callback) {
-    CollideWithQuad quadCollider = object->collider->callbacks->collideWithQuad;
-
-    if (!quadCollider) {
-        return;
-    }
-
-    short colliderIndices[MAX_COLLIDERS];
-    int quadCount = collisionObjectRoomColliders(&scene->world->rooms[object->body->currentRoom], &object->boundingBox, colliderIndices);
-
-    struct ContactConstraintState localContact;
-
-    for (int i = 0; i < quadCount; ++i) {
-        localContact.contactCount = 0;
-
-        if (quadCollider(object->collider->data, &object->body->transform, scene->quads[colliderIndices[i]].collider->data, &localContact) &&
-            collisionSceneFilterPortalContacts(&localContact)) {
-            callback(data, &localContact);
-        }
-    }
-}
-
 int collisionSceneIsTouchingSinglePortal(struct Vector3* contactPoint, struct Vector3* contactNormal, struct Transform* portalTransform, int portalIndex) {
     struct Vector3 localPoint;
-    transformPointInverse(portalTransform, contactPoint, &localPoint);
+    transformPointInverseNoScale(portalTransform, contactPoint, &localPoint);
 
     if (fabsf(localPoint.z) > PORTAL_THICKNESS) {
         return 0;
@@ -177,7 +207,7 @@ int collisionSceneIsTouchingPortal(struct Vector3* contactPoint, struct Vector3*
 
     for (int i = 0; i < 2; ++i) {
         if (collisionSceneIsTouchingSinglePortal(contactPoint, contactNormal, gCollisionScene.portalTransforms[i], i)) {
-            return 1;
+            return RigidBodyIsTouchingPortalA << i;
         }
     }
 
@@ -188,14 +218,100 @@ int collisionSceneIsPortalOpen() {
     return gCollisionScene.portalTransforms[0] != NULL && gCollisionScene.portalTransforms[1] != NULL;
 }
 
-void collisionSceneRaycastRoom(struct CollisionScene* scene, struct Room* room, struct Ray* ray, struct RaycastHit* hit) {
+void collisionSceneSetPortal(int portalIndex, struct Transform* transform, int roomIndex, int colliderIndex) {
+    gCollisionScene.portalTransforms[portalIndex] = transform;
+    gCollisionScene.portalRooms[portalIndex] = roomIndex;
+    gCollisionScene.portalColliderIndex[portalIndex] = colliderIndex;
+
+    if (gCollisionScene.portalTransforms[1 - portalIndex]) {
+        struct Transform inverseTransform;
+        transformInvert(transform, &inverseTransform);
+        transformConcat(gCollisionScene.portalTransforms[1 - portalIndex], &inverseTransform, &gCollisionScene.toOtherPortalTransform[portalIndex]);
+        transformInvert(&gCollisionScene.toOtherPortalTransform[portalIndex], &gCollisionScene.toOtherPortalTransform[1 - portalIndex]);
+    }
+}
+
+struct Transform* collisionSceneTransformToPortal(int fromPortal) {
+    if (!collisionSceneIsPortalOpen()) {
+        return NULL;
+    }
+
+    return &gCollisionScene.toOtherPortalTransform[fromPortal];
+}
+
+void collisionScenePushObjectsOutOfPortal(int portalIndex) {
+    if (!gCollisionScene.portalTransforms[portalIndex]) {
+        return;
+    }
+
+    struct Transform* portalTransform = gCollisionScene.portalTransforms[portalIndex];
+
+    struct Vector3 reversePortalNormal = gZeroVec;
+    reversePortalNormal.z = portalIndex ? -1.0f : 1.0f;
+    quatMultVector(&portalTransform->rotation, &reversePortalNormal, &reversePortalNormal);
+    
+    for (unsigned i = 0; i < gCollisionScene.dynamicObjectCount; ++i) {
+        struct CollisionObject* object = gCollisionScene.dynamicObjects[i];
+
+        if (!(object->body->flags & ((RigidBodyIsTouchingPortalA | RigidBodyWasTouchingPortalA) << portalIndex))) {
+            continue;
+        }
+
+        struct Vector3 colliderPoint;
+        minkowsiSumAgainstObject(object, &reversePortalNormal, &colliderPoint);
+
+        struct Vector3 offset;
+        vector3Sub(&portalTransform->position, &colliderPoint, &offset);
+
+        float depth = vector3Dot(&offset, &reversePortalNormal);
+
+        if (depth > 0.0f) {
+            continue;
+        }
+
+        vector3AddScaled(&object->body->transform.position, &reversePortalNormal, depth, &object->body->transform.position);
+    }
+}
+
+void collisionSceneRaycastRoom(struct CollisionScene* scene, struct Room* room, struct Ray* ray, int collisionLayers, struct RaycastHit* hit) {
     int currX = GRID_CELL_X(room, ray->origin.x);
     int currZ = GRID_CELL_Z(room, ray->origin.z);
 
     float xDirInv = fabsf(ray->dir.x) > 0.00001f ? 1.0f / ray->dir.x : 0.0f;
     float zDirInv = fabsf(ray->dir.z) > 0.00001f ? 1.0f / ray->dir.z : 0.0f;
 
-    // TODO adjust currX and currZ if ray starts outside room
+    if ((currX < 0 || currX >= room->spanX) && xDirInv != 0.0f) {
+        int boundX = (ray->dir.x > 0.0f ? 0 : room->spanX) * COLLISION_GRID_CELL_SIZE + room->cornerX;
+
+        float distanceToEdge = (boundX - ray->origin.x) * xDirInv;
+
+        if (distanceToEdge > 0.0f) {
+            float zAtDistance = ray->dir.z * distanceToEdge + ray->origin.z;
+
+            int zCheck = GRID_CELL_Z(room, zAtDistance);
+
+            if (zCheck >= 0 && zCheck < room->spanZ) {
+                currX = ray->dir.x > 0.0f ? 0 : room->spanX - 1;
+                currZ = zCheck;
+            }
+        }
+    }
+
+    if ((currZ < 0 || currZ >= room->spanZ) && zDirInv != 0.0f) {
+        int boundZ = (ray->dir.z > 0.0f ? 0 : room->spanZ) * COLLISION_GRID_CELL_SIZE + room->cornerZ;
+
+        float distanceToEdge = (boundZ - ray->origin.z) * zDirInv;
+
+        if (distanceToEdge > 0.0f) {
+            float xAtDistance = ray->dir.x * distanceToEdge + ray->origin.x;
+            int xCheck = GRID_CELL_X(room, xAtDistance);
+
+            if (xCheck >= 0 && xCheck < room->spanX) {
+                currX = xCheck;
+                currZ = ray->dir.z > 0.0f ? 0 : room->spanZ - 1;
+            }
+        }
+    }
 
     while (currX >=0 && currX < room->spanX && currZ >= 0 && currZ < room->spanZ) {
         struct Rangeu16* range = GRID_CELL_CONTENTS(room, currX, currZ);
@@ -203,7 +319,13 @@ void collisionSceneRaycastRoom(struct CollisionScene* scene, struct Room* room, 
         for (int i = range->min; i < range->max; ++i) {
             struct RaycastHit hitTest;
 
-            if (raycastQuad(&scene->quads[room->quadIndices[i]], ray, hit->distance, &hitTest) && hitTest.distance < hit->distance && vector3Dot(&hitTest.normal, &ray->dir) < 0.0f) {
+            struct CollisionObject* collisionObject = &scene->quads[room->quadIndices[i]];
+
+            if ((collisionObject->collisionLayers & collisionLayers) == 0) {
+                continue;
+            }
+
+            if (raycastQuad(collisionObject, ray, hit->distance, &hitTest) && hitTest.distance < hit->distance && vector3Dot(&hitTest.normal, &ray->dir) < 0.0f) {
                 hit->at = hitTest.at;
                 hit->normal = hitTest.normal;
                 hit->distance = hitTest.distance;
@@ -256,22 +378,51 @@ int collisionSceneRaycastDoorways(struct CollisionScene* scene, struct Room* roo
 
         struct Doorway* doorway = &scene->world->doorways[room->doorwayIndices[i]];
 
+        if ((doorway->flags & DoorwayFlagsOpen) == 0) {
+            continue;
+        }
+
         if (raycastQuadShape(&doorway->quad, ray, roomDistance, &hitTest) && hitTest.distance < roomDistance) {
             roomDistance = hitTest.distance;
-            // check that the doorway wasn't hit from the wrong side
-            int expectedRoom = vector3Dot(&doorway->quad.plane.normal, &hitTest.normal) < 0.0f ? doorway->roomA : doorway->roomB;
-            int otherRoom = currentRoom == doorway->roomA ? doorway->roomB : doorway->roomA;
-
-            if (expectedRoom == otherRoom) {
-                nextRoom = otherRoom;
-            }
+            nextRoom = currentRoom == doorway->roomA ? doorway->roomB : doorway->roomA;
         }
     }
 
     return nextRoom;
 }
 
-int collisionSceneRaycast(struct CollisionScene* scene, int roomIndex, struct Ray* ray, float maxDistance, int passThroughPortals, struct RaycastHit* hit) {
+void collisionSceneRaycastDynamic(struct CollisionScene* scene, struct Ray* ray, int collisionLayers, struct RaycastHit* hit) {
+    for (int i = 0; i < scene->dynamicObjectCount; ++i) {
+        struct RaycastHit hitTest;
+
+        struct CollisionObject* object = scene->dynamicObjects[i];
+
+        if ((object->collisionLayers & collisionLayers) == 0) {
+            continue;
+        }
+
+        if (object->collider->callbacks->raycast && 
+            object->collider->callbacks->raycast(object, ray, hit->distance, &hitTest) &&
+            hitTest.distance < hit->distance) {
+            hit->at = hitTest.at;
+            hit->normal = hitTest.normal;
+            hit->distance = hitTest.distance;
+            hit->object = hitTest.object;
+            hit->roomIndex = hitTest.roomIndex;
+        }
+    }
+}
+
+int collisionSceneRaycastOnlyDynamic(struct CollisionScene* scene, struct Ray* ray, int collisionLayers, float maxDistance, struct RaycastHit* hit) {
+    hit->distance = maxDistance;
+    hit->throughPortal = NULL;
+
+    collisionSceneRaycastDynamic(scene, ray, collisionLayers, hit);
+
+    return hit->distance != maxDistance;
+}
+
+int collisionSceneRaycast(struct CollisionScene* scene, int roomIndex, struct Ray* ray, int collisionLayers, float maxDistance, int passThroughPortals, struct RaycastHit* hit) {
     hit->distance = maxDistance;
     hit->throughPortal = NULL;
 
@@ -279,7 +430,7 @@ int collisionSceneRaycast(struct CollisionScene* scene, int roomIndex, struct Ra
 
     while (roomsToCheck && roomIndex != -1) {
         struct Room* room = &scene->world->rooms[roomIndex];
-        collisionSceneRaycastRoom(scene, room, ray, hit);
+        collisionSceneRaycastRoom(scene, room, ray, collisionLayers, hit);
 
         if (hit->distance != maxDistance) {
             hit->roomIndex = roomIndex;
@@ -293,21 +444,7 @@ int collisionSceneRaycast(struct CollisionScene* scene, int roomIndex, struct Ra
         --roomsToCheck;
     }
 
-    for (int i = 0; i < scene->dynamicObjectCount; ++i) {
-        struct RaycastHit hitTest;
-
-        struct CollisionObject* object = scene->dynamicObjects[i];
-
-        if (object->collider->callbacks->raycast && 
-            object->collider->callbacks->raycast(object, ray, hit->distance, &hitTest) &&
-            hitTest.distance < hit->distance) {
-            hit->at = hitTest.at;
-            hit->normal = hitTest.normal;
-            hit->distance = hitTest.distance;
-            hit->object = hitTest.object;
-            hit->roomIndex = hitTest.roomIndex;
-        }
-    }
+    collisionSceneRaycastDynamic(scene, ray, collisionLayers, hit);
 
     if (passThroughPortals && 
         hit->distance != maxDistance &&
@@ -324,7 +461,7 @@ int collisionSceneRaycast(struct CollisionScene* scene, int roomIndex, struct Ra
 
                 struct RaycastHit newHit;
 
-                int result = collisionSceneRaycast(scene, gCollisionScene.portalRooms[1 - i], &newRay, maxDistance - hit->distance, 0, &newHit);
+                int result = collisionSceneRaycast(scene, gCollisionScene.portalRooms[1 - i], &newRay, collisionLayers, maxDistance - hit->distance, 0, &newHit);
 
                 if (result) {
                     newHit.distance += hit->distance;
@@ -371,16 +508,265 @@ void collisionSceneRemoveDynamicObject(struct CollisionObject* object) {
     }
 }
 
+#define BROADPHASE_SCALE    16.0f
+
+union DynamicBroadphaseEdge {
+    struct {
+        unsigned short isLeadingEdge: 1;
+        unsigned short objectId: 7;
+        short sortKey;
+    };
+    int align;
+};
+
+struct DynamicBroadphase {
+    union DynamicBroadphaseEdge* edges;
+    short* objectsInCurrentRange;
+    int objectInRangeCount;
+};
+
+void dynamicBroadphasePopulate(struct DynamicBroadphase* broadphase, struct CollisionObject** objects, int count) {
+    int edgeIndex = 0;
+
+    for (int i = 0; i < count; ++i) {
+        union DynamicBroadphaseEdge edge;
+        edge.isLeadingEdge = 1;
+        edge.objectId = i;
+        edge.sortKey = (short)floorf(objects[i]->boundingBox.min.x * BROADPHASE_SCALE);
+
+        broadphase->edges[edgeIndex++] = edge;
+
+        edge.isLeadingEdge = 0;
+        edge.sortKey = (short)ceilf(objects[i]->boundingBox.max.x * BROADPHASE_SCALE);
+
+        broadphase->edges[edgeIndex++] = edge;
+    }
+}
+
+void dynamicBroadphaseSort(union DynamicBroadphaseEdge* edges, union DynamicBroadphaseEdge* tmp, int min, int max) {
+    if (min + 1 >= max) {
+        return;
+    }
+
+    int middle = (min + max) >> 1;
+    dynamicBroadphaseSort(edges, tmp, min, middle);
+    dynamicBroadphaseSort(edges, tmp, middle, max);
+
+    int aHead = min;
+    int bHead = middle;
+    int output = min;
+
+    while (aHead < middle && bHead < max) {
+        int sortDifference = (int)edges[aHead].sortKey - (int)edges[bHead].sortKey;
+
+        if (sortDifference <= 0) {
+            tmp[output].align = edges[aHead].align;
+            ++output;
+            ++aHead;
+        } else {
+            tmp[output].align = edges[bHead].align;
+            ++output;
+            ++bHead;
+        }
+    }
+
+    while (aHead < middle) {
+        tmp[output].align = edges[aHead].align;
+        ++output;
+        ++aHead;
+    }
+
+    while (bHead < max) {
+        tmp[output].align = edges[bHead].align;
+        ++output;
+        ++bHead;
+    }
+
+    for (output = min; output < max; ++output) {
+        edges[output] = tmp[output];
+    }
+}
+
+void collisionObjectCollidePairMixed(struct CollisionObject* a, struct Vector3* aPrevPos, struct Box3D* sweptA, struct CollisionObject* b, struct Vector3* bPrevPos, struct Box3D* sweptB, struct ContactSolver* contactSolver) {
+    if (a->manifoldIds & b->manifoldIds) {
+        collisionObjectCollideTwoObjects(a, b, contactSolver);
+    } else {
+        collisionObjectCollideTwoObjectsSwept(a, aPrevPos, sweptA, b, bPrevPos, sweptB, contactSolver);
+    }
+}
+
+void collisionSceneWalkBroadphase(struct CollisionScene* collisionScene, struct DynamicBroadphase* broadphase, struct Vector3* prevPos, struct Box3D* sweptBB) {
+    int broadphaseEdgeCount = collisionScene->dynamicObjectCount * 2;
+    for (int i = 0; i < broadphaseEdgeCount; ++i) {
+        union DynamicBroadphaseEdge edge;
+        edge.align = broadphase->edges[i].align;
+
+        struct CollisionObject* subject = collisionScene->dynamicObjects[edge.objectId];
+
+        if (edge.isLeadingEdge) {
+            for (int objectIndex = 0; objectIndex < broadphase->objectInRangeCount; ++objectIndex) {
+                short existingIndex = broadphase->objectsInCurrentRange[objectIndex];
+                struct CollisionObject* existing = collisionScene->dynamicObjects[existingIndex];
+
+                if ((existing->collisionLayers & subject->collisionLayers) == 0) {
+                    continue;
+                }
+
+                if (!collisionObjectShouldGenerateConctacts(existing) && !collisionObjectShouldGenerateConctacts(subject)) {
+                    continue;
+                }
+
+                // collide pair lowest in memory first
+                if (existing < subject) {
+                    collisionObjectCollidePairMixed(
+                        existing, 
+                        &prevPos[existingIndex], 
+                        &sweptBB[existingIndex], 
+                        subject, 
+                        &prevPos[edge.objectId], 
+                        &sweptBB[edge.objectId], 
+                        &gContactSolver
+                    );
+                } else {
+                    collisionObjectCollidePairMixed(
+                        subject, 
+                        &prevPos[edge.objectId],
+                        &sweptBB[edge.objectId], 
+                        existing, 
+                        &prevPos[existingIndex], 
+                        &sweptBB[existingIndex],
+                        &gContactSolver
+                    );
+                }
+            }
+
+            // add object
+            broadphase->objectsInCurrentRange[broadphase->objectInRangeCount] = edge.objectId;
+            ++broadphase->objectInRangeCount;
+        } else {
+            // remove object
+            int hasFound = 0;
+            for (int i = 0; i < broadphase->objectInRangeCount - 1; ++i) {
+                if (broadphase->objectsInCurrentRange[i] == edge.objectId) {
+                    hasFound = 1;
+                }
+
+                if (hasFound) {
+                    broadphase->objectsInCurrentRange[i] = broadphase->objectsInCurrentRange[i + 1];
+                }
+            }
+
+            --broadphase->objectInRangeCount;
+        }
+    }
+}
+
+void collisionSceneUpdateObjectCurrentRooms(struct Vector3* prevPosList){
+    for (unsigned i = 0; i < gCollisionScene.dynamicObjectCount; ++i) {
+        int doorwayMask = worldCheckDoorwaySides(&gCurrentLevel->world, &prevPosList[i], gCollisionScene.dynamicObjects[i]->body->currentRoom);
+        gCollisionScene.dynamicObjects[i]->body->currentRoom = worldCheckDoorwayCrossings(&gCurrentLevel->world, &gCollisionScene.dynamicObjects[i]->body->transform.position, gCollisionScene.dynamicObjects[i]->body->currentRoom, doorwayMask);
+    }
+}
+
+void collisionSceneCollideDynamicPairs(struct CollisionScene* collisionScene, struct Vector3* prevPos, struct Box3D* sweptBB) {
+
+    struct DynamicBroadphase dynamicBroadphase;
+
+    dynamicBroadphase.edges = stackMalloc(sizeof(union DynamicBroadphaseEdge) * collisionScene->dynamicObjectCount * 2);
+    dynamicBroadphasePopulate(&dynamicBroadphase, collisionScene->dynamicObjects, collisionScene->dynamicObjectCount);
+
+    union DynamicBroadphaseEdge* tmpEdges = stackMalloc(sizeof(union DynamicBroadphaseEdge) * collisionScene->dynamicObjectCount * 2);
+    dynamicBroadphaseSort(dynamicBroadphase.edges, tmpEdges, 0, collisionScene->dynamicObjectCount * 2);
+    stackMallocFree(tmpEdges);
+
+    dynamicBroadphase.objectsInCurrentRange = stackMalloc(sizeof(short) * collisionScene->dynamicObjectCount);
+    dynamicBroadphase.objectInRangeCount = 0;
+
+    collisionSceneWalkBroadphase(collisionScene, &dynamicBroadphase, prevPos, sweptBB);
+
+    collisionSceneUpdateObjectCurrentRooms(prevPos);
+
+    stackMallocFree(dynamicBroadphase.objectsInCurrentRange);
+    stackMallocFree(dynamicBroadphase.edges);
+}
+
+int collisionSceneObjectIsTouchingPortal(struct CollisionObject* object, int portalIndex) {
+    struct Simplex simplex;
+    struct Vector3 direction;
+    quatMultVector(&gCollisionScene.portalTransforms[portalIndex]->rotation, &gRight, &direction);
+    return gjkCheckForOverlap(&simplex, 
+        object, minkowsiSumAgainstObject,
+        gCollisionScene.portalTransforms[portalIndex], minkowsiSumAgainstPortal,
+        &direction
+    );   
+}
+
 void collisionSceneUpdateDynamics() {
     for (unsigned i = 0; i < gCollisionScene.dynamicObjectCount; ++i) {
-        collisionObjectCollideWithScene(gCollisionScene.dynamicObjects[i], &gCollisionScene, &gContactSolver);
+        // added back in by contactSolverRemoveUnusedContacts if there are actually contacts
+        gCollisionScene.dynamicObjects[i]->flags &= ~COLLISION_OBJECT_HAS_CONTACTS;
     }
+
+	contactSolverRemoveUnusedContacts(&gContactSolver);
+
+    struct Vector3* prevPosList = stackMalloc(sizeof(struct Vector3) * gCollisionScene.dynamicObjectCount);
+    struct Box3D* sweptBB = stackMalloc(sizeof(struct Box3D) * gCollisionScene.dynamicObjectCount);
+
+    for (unsigned i = 0; i < gCollisionScene.dynamicObjectCount; ++i) {
+        struct CollisionObject* object = gCollisionScene.dynamicObjects[i];
+
+        prevPosList[i] = object->body->transform.position;
+        sweptBB[i] = object->boundingBox;
+
+        if (!collisionObjectShouldGenerateConctacts(object)) {
+            continue;
+        }
+
+        if (object->body->flags & (RigidBodyIsTouchingPortalA | RigidBodyWasTouchingPortalA)) {
+            if (collisionSceneObjectIsTouchingPortal(object, 0)) {
+                object->body->flags |= RigidBodyIsTouchingPortalA;
+            }
+        }
+
+        if (object->body->flags & (RigidBodyIsTouchingPortalB | RigidBodyWasTouchingPortalB)) {
+            if (collisionSceneObjectIsTouchingPortal(object, 1)) {
+                object->body->flags |= RigidBodyIsTouchingPortalB;
+            }
+        }
+
+        if (!collisionObjectIsActive(object)) {
+            continue;
+        }
+
+        rigidBodyUpdate(object->body);
+        collisionObjectUpdateBB(object);
+        box3DUnion(&sweptBB[i], &object->boundingBox, &sweptBB[i]);
+
+        collisionObjectCollideMixed(object, &prevPosList[i], &sweptBB[i], &gCollisionScene, &gContactSolver);
+    }
+
+    collisionSceneCollideDynamicPairs(&gCollisionScene, prevPosList, sweptBB);
+
+    stackMallocFree(sweptBB);
+    stackMallocFree(prevPosList);
 
     contactSolverSolve(&gContactSolver);
 
     for (unsigned i = 0; i < gCollisionScene.dynamicObjectCount; ++i) {
-        rigidBodyUpdate(gCollisionScene.dynamicObjects[i]->body);
-        rigidBodyCheckPortals(gCollisionScene.dynamicObjects[i]->body);
-        collisionObjectUpdateBB(gCollisionScene.dynamicObjects[i]);
+        struct CollisionObject* collisionObject = gCollisionScene.dynamicObjects[i];
+        if (!collisionObjectIsActive(collisionObject)) {
+            // kind of a hack, but the player is the only kinematic body that
+            // also generates contacts and the player velocty should not be 
+            // cleared
+            if (!collisionObjectShouldGenerateConctacts(collisionObject)) {
+                // clear out any velocities
+                collisionObject->body->velocity = gZeroVec;
+                collisionObject->body->angularVelocity = gZeroVec;
+            }
+            continue;
+        }
+
+        rigidBodyCheckPortals(collisionObject->body);
+        collisionObjectUpdateBB(collisionObject);
     }
 }

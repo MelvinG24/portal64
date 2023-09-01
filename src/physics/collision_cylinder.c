@@ -5,14 +5,66 @@
 #include "collision_quad.h"
 #include "raycasting.h"
 #include "line.h"
+#include "../math/vector2.h"
+#include "./raycasting.h"
 
 struct ColliderCallbacks gCollisionCylinderCallbacks = {
-    NULL,
-    collisionCylinderCollideQuad,
-    raycastCylinder,
+    collisionCylinderRaycast,
     collisionCylinderSolidMofI,
     collisionCylinderBoundingBox,
+    collisionCylinderMinkowsiSum,
 };
+
+void collisionCylinderBoxCheckForFaces(struct CollisionCylinder* cylinder) {
+    if (cylinder->outsideFaces[0].edgeALength > 0.0f) {
+        return;
+    }
+
+    struct Vector2 prevPoint;
+    vector2Scale(&cylinder->edgeVectors[cylinder->edgeCount - 1], -cylinder->radius, &prevPoint);
+
+    for (int i = 0; i < (cylinder->edgeCount << 1); ++i) {
+        struct Vector2 currPoint;
+        vector2Scale(&cylinder->edgeVectors[i % cylinder->edgeCount], i >= cylinder->edgeCount ? -cylinder->radius : cylinder->radius, &currPoint);
+
+        struct CollisionQuad* quad = &cylinder->outsideFaces[i];
+
+        quad->corner.x = prevPoint.x;
+        quad->corner.y = -cylinder->halfHeight;
+        quad->corner.z = prevPoint.y;
+
+        struct Vector3 toEdge;
+
+        toEdge.x = currPoint.x;
+        toEdge.y = -cylinder->halfHeight;
+        toEdge.z = currPoint.y;
+
+        vector3Sub(&toEdge, &quad->corner, &quad->edgeA);
+        quad->edgeALength = sqrtf(vector3MagSqrd(&quad->edgeA));
+        vector3Scale(&quad->edgeA, &quad->edgeA, 1.0f / quad->edgeALength);
+
+        quad->edgeB = gUp;
+        quad->edgeBLength = cylinder->halfHeight * 2.0f;
+
+        vector3Cross(&quad->edgeA, &quad->edgeB, &quad->plane.normal);
+
+        if (vector3Dot(&quad->plane.normal, &quad->corner) < 0.0f) {
+            struct Vector3 tmpEdge = quad->edgeA;
+            quad->edgeA = quad->edgeB;
+            quad->edgeB = tmpEdge;
+
+            float tmpLen = quad->edgeALength;
+            quad->edgeALength = quad->edgeBLength;
+            quad->edgeBLength = tmpLen;
+
+            vector3Negate(&quad->plane.normal, &quad->plane.normal);
+        }
+
+        quad->plane.d = -vector3Dot(&quad->plane.normal, &quad->corner);
+
+        prevPoint = currPoint;
+    }
+}
 
 float collisionCylinderSolidMofI(struct ColliderTypeData* typeData, float mass) {
     struct CollisionCylinder* cylinder = (struct CollisionCylinder*)typeData->data;
@@ -37,329 +89,146 @@ void collisionCylinderBoundingBox(struct ColliderTypeData* typeData, struct Tran
     vector3Add(&transform->position, &halfSize, &box->max);
 }
 
-int _collisionPointCheckOverlapWithQuad(struct Vector3* pointToCheck, struct Vector3* colliderCenter, struct CollisionQuad* quad, struct ContactConstraintState* output, int id) {
-    float edgeDistance = planePointDistance(&quad->plane, pointToCheck);
-
-    if (edgeDistance > NEGATIVE_PENETRATION_BIAS) {
-        return POINT_NO_OVERLAP;
-    }
-
-    int edgesToCheck = collisionQuadDetermineEdges(pointToCheck, quad);
-
-    if (!edgesToCheck) {
-        if (output->contactCount == 0) {
-            collisionQuadInitializeNormalContact(quad, output);
-        }
-
-        struct ContactState* contact = &output->contacts[output->contactCount];
-
-        ++output->contactCount;
-
-        vector3Sub(pointToCheck, colliderCenter, &contact->rb);
-        vector3AddScaled(pointToCheck, &quad->plane.normal, -edgeDistance, &contact->ra);
-
-        contact->id = id;
-        contact->penetration = edgeDistance;
-        contact->bias = 0;
-        contact->normalMass = 0;
-        contact->tangentMass[0] = 0.0f;
-        contact->tangentMass[1] = 0.0f;
-        contact->normalImpulse = 0.0f;
-        contact->tangentImpulse[0] = 0.0f;
-        contact->tangentImpulse[1] = 0.0f;
-    }
-
-    return edgesToCheck;
-}
-
-int _collisionCylinderParallel(struct CollisionCylinder* cylinder, struct Transform* cylinderTransform, struct Vector3* centerAxis, struct Vector3* crossAxis, float normalDotProduct, struct CollisionQuad* quad, struct ContactConstraintState* output) {
-    struct Vector3 edgeEndpoint;
-    vector3AddScaled(&cylinderTransform->position, centerAxis, normalDotProduct > 0.0f ? -cylinder->halfHeight : cylinder->halfHeight, &edgeEndpoint);
-    vector3Add(&edgeEndpoint, crossAxis, &edgeEndpoint);
-
-    int edgesToCheck = _collisionPointCheckOverlapWithQuad(&edgeEndpoint, &cylinderTransform->position, quad, output, 0);
-
-    if (edgesToCheck == POINT_NO_OVERLAP) {
-        return 0;
-    }
-
-    vector3AddScaled(&edgeEndpoint, centerAxis,  (normalDotProduct > 0.0f ? 2.0f : -2.0f) * cylinder->halfHeight, &edgeEndpoint);
-
-    int otherEdgesToCheck = _collisionPointCheckOverlapWithQuad(&edgeEndpoint, &cylinderTransform->position, quad, output, 1);
-
-    if (otherEdgesToCheck != POINT_NO_OVERLAP) {
-        edgesToCheck |= otherEdgesToCheck;
-    }
-
-    return edgesToCheck;
-}
-
-int _collisionCylinderPerpendicular(struct CollisionCylinder* cylinder, struct Transform* cylinderTransform, struct Vector3* centerAxis, struct Vector3* crossAxis, float normalDotProduct, struct CollisionQuad* quad, struct ContactConstraintState* output) {
-    float centerDistance = planePointDistance(&quad->plane, &cylinderTransform->position);
-
-    if (centerDistance < -cylinder->radius) {
-        return 0;
-    }
-
-    struct Vector3 edgeEndpoint;
-    struct Vector3 centerPoint;
-    vector3AddScaled(&cylinderTransform->position, centerAxis, normalDotProduct > 0.0f ? -cylinder->halfHeight : cylinder->halfHeight, &centerPoint);
-    vector3Add(&centerPoint, crossAxis, &edgeEndpoint);
-
-    int edgesToCheck = _collisionPointCheckOverlapWithQuad(&edgeEndpoint, &cylinderTransform->position, quad, output, 0);
-
-    if (edgesToCheck == POINT_NO_OVERLAP) {
-        return 0;
-    }
-
-    struct Vector3 rotatedCrossAxis;
-    vector3Cross(centerAxis, crossAxis, &rotatedCrossAxis);
-    vector3Add(&centerPoint, &rotatedCrossAxis, &edgeEndpoint);
-    int otherEdgesToCheck = _collisionPointCheckOverlapWithQuad(&edgeEndpoint, &cylinderTransform->position, quad, output, 2);
-
-    if (otherEdgesToCheck == POINT_NO_OVERLAP) {
-        return edgesToCheck;
-    }
-    edgesToCheck |= otherEdgesToCheck;
-
-    vector3Negate(&rotatedCrossAxis, &rotatedCrossAxis);
-    vector3Add(&centerPoint, &rotatedCrossAxis, &edgeEndpoint);
-    otherEdgesToCheck = _collisionPointCheckOverlapWithQuad(&edgeEndpoint, &cylinderTransform->position, quad, output, 3);
-
-    if (otherEdgesToCheck == POINT_NO_OVERLAP) {
-        return edgesToCheck;
-    }
-    edgesToCheck |= otherEdgesToCheck;
-
-    vector3Negate(crossAxis, crossAxis);
-    vector3Add(&centerPoint, crossAxis, &edgeEndpoint);
-    otherEdgesToCheck = _collisionPointCheckOverlapWithQuad(&edgeEndpoint, &cylinderTransform->position, quad, output, 4);
-
-    if (otherEdgesToCheck != POINT_NO_OVERLAP) {
-        edgesToCheck |= otherEdgesToCheck;
-    }
-
-    return edgesToCheck;
-}
-
-#define EDGE_LERP_BIAS  0.00001f
-
-void collisionCylinderSingleCap(struct CollisionCylinder* cylinder, struct Transform* cylinderTransform, struct Vector3* centerAxis, float capDistance, float invDot, int idOffset, struct CollisionEdge* edge, struct Vector3* edgeDirection, struct ContactConstraintState* output) {
-    float dOffset = vector3Dot(&cylinderTransform->position, centerAxis);
-    float lineDot = vector3Dot(&edge->origin, centerAxis);
-
-    float distance = -(lineDot - (dOffset + capDistance)) * invDot;
-
-    if (distance < EDGE_LERP_BIAS || distance > edge->length + EDGE_LERP_BIAS) {
-        return;
-    }
-
-    struct ContactState* contact = &output->contacts[output->contactCount];
-
-    vector3AddScaled(&cylinderTransform->position, centerAxis, capDistance, &contact->rb);
-    vector3AddScaled(&edge->origin, &edge->direction, distance, &contact->ra);
-
-    struct Vector3 offset;
-    vector3Sub(&contact->rb, &contact->ra, &offset);
-    float offsetSqrd = vector3MagSqrd(&offset);
-
-    if (offsetSqrd > cylinder->radius * cylinder->radius) {
-        return;
-    }
-
-    if (vector3Dot(&offset, edgeDirection) < 0.0f) {
-        return;
-    }
-
-    if (output->contactCount == 0) {
-        if (offsetSqrd < 0.00001f) {
-            vector3Cross(centerAxis, edgeDirection, &output->normal);
-        } else {
-            vector3Sub(&contact->ra, &contact->ra, &output->normal);
-        }
-        vector3Normalize(&output->normal, &output->normal);
-    
-        output->tangentVectors[0] = *centerAxis;
-        vector3Cross(&output->normal, &output->tangentVectors[0], &output->tangentVectors[1]);
-        output->restitution = 0.0f;
-        output->friction = 1.0f;
-    }
-
-    vector3AddScaled(&contact->rb, &output->normal, -cylinder->radius, &contact->rb);
-
-    contact->penetration = vector3Dot(&contact->ra, &output->normal) - vector3Dot(&contact->rb, &output-> normal);
-    if (contact->penetration >= NEGATIVE_PENETRATION_BIAS) {
-        return;
-    }
-    
-    contact->id = idOffset;
-    contact->bias = 0;
-    contact->normalMass = 0;
-    contact->tangentMass[0] = 0.0f;
-    contact->tangentMass[1] = 0.0f;
-    contact->normalImpulse = 0.0f;
-    contact->tangentImpulse[0] = 0.0f;
-    contact->tangentImpulse[1] = 0.0f;
-
-    ++output->contactCount;
-}
-
-int collisionCylinderCap(struct CollisionCylinder* cylinder, struct Transform* cylinderTransform, struct Vector3* centerAxis, float normalDotProduct, int idOffset, struct CollisionEdge* edge, struct Vector3* edgeDirection, struct ContactConstraintState* output) {
-    if (fabsf(normalDotProduct) < 0.00001f) {
-        return 0;
-    }
-
-    float invDot = 1.0f / normalDotProduct;
-
-    collisionCylinderSingleCap(cylinder, cylinderTransform, centerAxis, cylinder->halfHeight, invDot, idOffset + 1, edge, edgeDirection, output);
-    collisionCylinderSingleCap(cylinder, cylinderTransform, centerAxis, -cylinder->halfHeight, invDot, idOffset + 2, edge, edgeDirection, output);
-
-    return output->contactCount > 0;
-}
-
-int collisionCylinderEdge(struct CollisionCylinder* cylinder, struct Transform* cylinderTransform, struct Vector3* centerAxis, float normalDotProduct, int idOffset, struct CollisionEdge* edge, struct Vector3* edgeDirection, struct ContactConstraintState* output) {
-    float cylinderLerp;
-    float edgeLerp;
-    
-    if (!lineNearestApproach(&cylinderTransform->position, centerAxis, &edge->origin, &edge->direction, &cylinderLerp, &edgeLerp)) {
-        return collisionCylinderCap(cylinder, cylinderTransform, centerAxis, normalDotProduct, idOffset, edge, edgeDirection, output);
-    }
-
-    struct ContactState* contact = &output->contacts[output->contactCount];
-
-    vector3AddScaled(&cylinderTransform->position, centerAxis, cylinderLerp, &contact->rb);
-    vector3AddScaled(&edge->origin, &edge->direction, edgeLerp, &contact->ra);
-
-    struct Vector3 offset;
-    vector3Sub(&contact->rb, &contact->ra, &offset);
-    float offsetSqrd = vector3MagSqrd(&offset);
-
-    if (offsetSqrd > cylinder->radius * cylinder->radius) {
-        return 0;
-    }
-
-    if (cylinderLerp > -cylinder->halfHeight - EDGE_LERP_BIAS && cylinderLerp < cylinder->halfHeight + EDGE_LERP_BIAS &&
-        edgeLerp > -EDGE_LERP_BIAS && edgeLerp < edge->length + EDGE_LERP_BIAS) {
-
-        if (vector3Dot(&offset, edgeDirection) < 0.0f) {
-            return 0;
-        }
-
-        struct Vector3 offsetNormalized;
-
-        if (offsetSqrd < 0.00001f) {
-            vector3Cross(centerAxis, &edge->direction, &offsetNormalized);
-            vector3Normalize(&offsetNormalized, &offsetNormalized);
-        } else {
-            vector3Scale(&offset, &offsetNormalized, 1.0f / sqrtf(offsetSqrd));
-        }
-
-        if (output->contactCount == 0) {
-            output->normal = offsetNormalized;
-            output->tangentVectors[0] = *centerAxis;
-            vector3Cross(&output->normal, &output->tangentVectors[0], &output->tangentVectors[1]);
-            output->restitution = 0.0f;
-            output->friction = 1.0f;
-        }
-
-        vector3AddScaled(&contact->rb, &offsetNormalized, -cylinder->radius, &contact->rb);
-
-        contact->penetration = vector3Dot(&contact->ra, &output->normal) - vector3Dot(&contact->rb, &output-> normal);
-        if (contact->penetration >= NEGATIVE_PENETRATION_BIAS) {
-            return 0;
-        }
-
-        contact->id = idOffset;
-        contact->bias = 0;
-        contact->normalMass = 0;
-        contact->tangentMass[0] = 0.0f;
-        contact->tangentMass[1] = 0.0f;
-        contact->normalImpulse = 0.0f;
-        contact->tangentImpulse[0] = 0.0f;
-        contact->tangentImpulse[1] = 0.0f;
-
-        ++output->contactCount;
-        return 1;
-    }
-
-    return collisionCylinderCap(cylinder, cylinderTransform, centerAxis, normalDotProduct, idOffset, edge, edgeDirection, output);
-}
-
-int collisionCylinderCollideQuad(void* data, struct Transform* cylinderTransform, struct CollisionQuad* quad, struct ContactConstraintState* output) {
-    struct Vector3 centerAxis;
-    quatMultVector(&cylinderTransform->rotation, &gUp, &centerAxis);
-
-    float normalDotProduct = vector3Dot(&centerAxis, &quad->plane.normal);
-
-    struct Vector3 capCenterTowardsPlane;
-    vector3AddScaled(&quad->plane.normal, &centerAxis, -normalDotProduct, &capCenterTowardsPlane);
-    vector3Negate(&capCenterTowardsPlane, &capCenterTowardsPlane);
-
-    float magSqrd = vector3MagSqrd(&capCenterTowardsPlane);
-
-    int edgesToCheck;
-
+int collisionCylinderMinkowsiSum(void* data, struct Basis* basis, struct Vector3* direction, struct Vector3* output) {
     struct CollisionCylinder* cylinder = (struct CollisionCylinder*)data;
+    int centerDir = vector3Dot(&basis->y, direction) > 0.0f;
 
-    output->contactCount = 0;
+    vector3Scale(&basis->y, output, centerDir > 0.0f ? cylinder->halfHeight : -cylinder->halfHeight);
 
-    if (fabsf(magSqrd) < 0.7f) {
-        if (magSqrd < 0.0001f) {
-            // if the two shapes are too well aligned then pick
-            // an arbitrary axis to use to construct face points
-            if (fabsf(centerAxis.x) > fabsf(centerAxis.z)) {
-                vector3Cross(&gForward, &centerAxis, &capCenterTowardsPlane);
-            } else {
-                vector3Cross(&gRight, &centerAxis, &capCenterTowardsPlane);
-            }
-            vector3Scale(&capCenterTowardsPlane, &capCenterTowardsPlane, cylinder->radius / sqrtf(vector3MagSqrd(&capCenterTowardsPlane)));
-        } else {
-            vector3Scale(&capCenterTowardsPlane, &capCenterTowardsPlane, cylinder->radius / sqrtf(magSqrd));
+    struct Vector2 crossDirectionCheck;
+    crossDirectionCheck.x = vector3Dot(&basis->x, direction);
+    crossDirectionCheck.y = vector3Dot(&basis->z, direction);
+
+
+    float dotDiff = vector2Dot(&crossDirectionCheck, &cylinder->edgeVectors[0]);
+    int closest = 0;
+
+    for (int i = 1; i < cylinder->edgeCount; ++i) {
+        float dotCheck = vector2Dot(&crossDirectionCheck, &cylinder->edgeVectors[i]);
+
+        if (fabsf(dotCheck) > fabsf(dotDiff)) {
+            dotDiff = dotCheck;
+            closest = i;
         }
-        edgesToCheck = _collisionCylinderPerpendicular(cylinder, cylinderTransform, &centerAxis, &capCenterTowardsPlane, normalDotProduct, quad, output);
+    }
+
+    struct Vector2 crossDirection;
+
+    int faceId = closest;
+
+    if (dotDiff < 0.0f) {
+        faceId += cylinder->edgeCount;
+        vector2Negate(&cylinder->edgeVectors[closest], &crossDirection);
     } else {
-        vector3Scale(&capCenterTowardsPlane, &capCenterTowardsPlane, cylinder->radius / sqrtf(magSqrd));
-        edgesToCheck = _collisionCylinderParallel(cylinder, cylinderTransform, &centerAxis, &capCenterTowardsPlane, normalDotProduct, quad, output);
+        crossDirection = cylinder->edgeVectors[closest];
     }
 
-    if (!edgesToCheck) {
-        return output->contactCount > 0;
+    int nextId = faceId + 1;
+
+    if (faceId == cylinder->edgeCount * 2) {
+        nextId = 0;
     }
 
-    struct CollisionEdge edge;
-    struct Vector3 edgeDirection;
+    vector3AddScaled(output, &basis->x, crossDirection.x * cylinder->radius, output);
+    vector3AddScaled(output, &basis->z, crossDirection.y * cylinder->radius, output);
 
-    if (edgesToCheck & (1 << 0)) {
-        edge.origin = quad->corner;
-        edge.direction = quad->edgeB;
-        edge.length = quad->edgeBLength;
-        vector3Negate(&quad->edgeA, &edgeDirection);
-        collisionCylinderEdge(cylinder, cylinderTransform, &centerAxis, normalDotProduct, 5, &edge, &edgeDirection, output);
+    return (centerDir ? 0x1 : 0x2) | (1 << (faceId + 2)) | (1 << (nextId + 2));
+}
+
+int collisionCylinderRaycastCap(struct CollisionObject* cylinderObject, struct Ray* ray, struct Ray* localRay, float maxDistance, struct RaycastHit* contact) {
+    struct CollisionCylinder* cylinder = (struct CollisionCylinder*)cylinderObject->collider->data;
+
+    struct Plane localPlane;
+
+    localPlane.normal = gZeroVec;
+    localPlane.normal.y = localRay->dir.y > 0.0f ? -1.0f : 1.0f;
+    localPlane.d = -cylinder->halfHeight;
+
+    float capHitDistance;
+    if (!planeRayIntersection(&localPlane, &localRay->origin, &localRay->dir, &capHitDistance)) {
+        return 0;
     }
 
-    if (edgesToCheck & (1 << 1)) {
-        edge.origin = quad->corner;
-        edge.direction = quad->edgeA;
-        edge.length = quad->edgeALength;
-        vector3Negate(&quad->edgeB, &edgeDirection);
-        collisionCylinderEdge(cylinder, cylinderTransform, &centerAxis, normalDotProduct, 8, &edge, &edgeDirection, output);
-    }
-
-    if (edgesToCheck & (1 << 2)) {
-        vector3AddScaled(&quad->corner, &quad->edgeA, quad->edgeALength, &edge.origin);
-        edge.direction = quad->edgeB;
-        edge.length = quad->edgeBLength;
-        collisionCylinderEdge(cylinder, cylinderTransform, &centerAxis, normalDotProduct, 11, &edge, &edgeDirection, output);
-    }
-
-    if (edgesToCheck & (1 << 3)) {
-        vector3AddScaled(&quad->corner, &quad->edgeB, quad->edgeBLength, &edge.origin);
-        edge.direction = quad->edgeA;
-        edge.length = quad->edgeALength;
-        collisionCylinderEdge(cylinder, cylinderTransform, &centerAxis, normalDotProduct, 14, &edge, &edgeDirection, output);
+    if (capHitDistance < 0.0f || capHitDistance > maxDistance) {
+        return 0;
     }
     
-    // TODO check edges and points of quad
+    struct Vector3 localHit;
+    vector3AddScaled(&localRay->origin, &localRay->dir, capHitDistance, &localHit);
 
-    return 0;
+    for (int i = 0; i < (cylinder->edgeCount << 1); ++i) {
+        if (planePointDistance(&cylinder->outsideFaces[i].plane, &localHit) > 0.0f) {
+            return 0;
+        }
+    }
+
+    vector3AddScaled(&ray->origin, &ray->dir, capHitDistance, &contact->at);
+    if (localPlane.normal.y > 0.0f) {
+        contact->normal = cylinderObject->body->rotationBasis.y;
+    } else {
+        vector3Negate(&cylinderObject->body->rotationBasis.y, &contact->normal);
+    }
+
+    contact->distance = capHitDistance;
+    contact->object = cylinderObject;
+    contact->throughPortal = 0;
+    contact->roomIndex = cylinderObject->body->currentRoom;
+
+    return 1;
+}
+
+int collisionCylinderRaycast(struct CollisionObject* cylinderObject, struct Ray* ray, float maxDistance, struct RaycastHit* contact) {
+    float rayLerp;
+    float cylinderLerp;
+
+    struct CollisionCylinder* cylinder = (struct CollisionCylinder*)cylinderObject->collider->data;
+    collisionCylinderBoxCheckForFaces(cylinder);
+
+    if (!lineNearestApproach(&ray->origin, &ray->dir, &cylinderObject->body->transform.position, &cylinderObject->body->rotationBasis.y, &rayLerp, &cylinderLerp)) {
+        struct Ray localRay;
+        collisionObjectLocalRay(cylinderObject, ray, &localRay);
+        return collisionCylinderRaycastCap(cylinderObject, ray, &localRay, maxDistance, contact);
+    }
+
+    if (rayLerp < 0.0f) {
+        return 0;
+    }
+
+    float diagnalReach = cylinder->radius * cylinder->radius + cylinder->halfHeight * cylinder->halfHeight;
+
+    float distanceCheck = maxDistance + diagnalReach;
+
+    if (rayLerp > distanceCheck * distanceCheck) {
+        return 0;
+    }
+
+    struct Vector3 rayApproach;
+    vector3AddScaled(&ray->origin, &ray->dir, rayLerp, &rayApproach);
+
+    struct Vector3 cylinderApproach;
+    vector3AddScaled(&cylinderObject->body->transform.position, &cylinderObject->body->rotationBasis.y, cylinderLerp, &cylinderApproach);
+
+    if (vector3DistSqrd(&rayApproach, &cylinderApproach) > cylinder->radius * cylinder->radius) {
+        return 0;
+    }
+
+    struct Ray localRay;
+    collisionObjectLocalRay(cylinderObject, ray, &localRay);
+
+    for (int i = 0; i < (cylinder->edgeCount << 1); ++i) {
+        if (raycastQuadShape(&cylinder->outsideFaces[i], &localRay, maxDistance, contact)) {
+            struct Vector3 rotatedNormal;
+            basisRotate(&cylinderObject->body->rotationBasis, &contact->normal, &rotatedNormal);
+            contact->normal = rotatedNormal;
+            vector3AddScaled(&ray->origin, &ray->dir, contact->distance, &contact->at);
+
+            contact->object = cylinderObject;
+            contact->throughPortal = 0;
+            contact->roomIndex = cylinderObject->body->currentRoom;
+            
+            return 1;
+        }
+    }
+
+    return collisionCylinderRaycastCap(cylinderObject, ray, &localRay, maxDistance, contact);
 }

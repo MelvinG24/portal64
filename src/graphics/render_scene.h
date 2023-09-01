@@ -9,6 +9,7 @@
 struct RenderPart {
     Mtx* matrix;
     Gfx* geometry;
+    Mtx* armature;
 };
 
 struct RenderScene {
@@ -24,8 +25,11 @@ struct RenderScene {
     struct RenderState *renderState;
 };
 
-struct RenderScene* renderSceneInit(struct Transform* cameraTransform, struct RenderState *renderState, int capacity, u64 visibleRooms);
-void renderSceneAdd(struct RenderScene* renderScene, Gfx* geometry, Mtx* matrix, int materialIndex, struct Vector3* at);
+struct RenderScene* renderSceneNew(struct Transform* cameraTransform, struct RenderState *renderState, int capacity, u64 visibleRooms);
+void renderSceneFree(struct RenderScene* renderScene);
+void renderSceneAdd(struct RenderScene* renderScene, Gfx* geometry, Mtx* matrix, int materialIndex, struct Vector3* at, Mtx* armature);
 void renderSceneGenerate(struct RenderScene* renderScene, struct RenderState* renderState);
+
+#define RENDER_SCENE_IS_ROOM_VISIBLE(renderScene, roomIndex) (((renderScene)->visibleRooms & (1 << (roomIndex))) != 0)
 
 #endif

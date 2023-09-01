@@ -3,24 +3,46 @@
 
 #include <ultra64.h>
 #include "level_definition.h"
+#include "../audio/clips.h"
+#include "../savefile/serializer.h"
 
-struct CutsceneRunner {
-    struct Cutscene currentCutscene;
+union CutsceneStepState {
+    struct {
+        ALSndId soundId;
+    } playSound;
+    float delay;
+}; 
+
+struct CutsceneSerialized {
+    u16 cutsceneIndex;
     u16 currentStep;
-
-    union {
-        struct {
-            ALSndId soundId;
-        } playSound;
-        float delay;
-    } state;
+    union CutsceneStepState state;
 };
 
-extern struct CutsceneRunner gCutsceneRunner;
+struct CutsceneRunner {
+    struct Cutscene* currentCutscene;
+    u16 currentStep;
+    union CutsceneStepState state;
 
-void cutsceneRunnerRun(struct CutsceneRunner* runner, struct Cutscene* cutscene);
-void cutsceneRunnerUpdate(struct CutsceneRunner* runner);
+    struct CutsceneRunner* nextRunner;
+};
 
-int cutsceneRunnerIsRunning(struct CutsceneRunner* runner);
+void cutsceneRunnerReset();
+void cutsceneStart(struct Cutscene* cutscene);
+void cutsceneStop(struct Cutscene* cutscene);
+int cutsceneIsRunning(struct Cutscene* cutscene);
+void cutscenesUpdate();
+float cutsceneEstimateTimeLeft(struct Cutscene* cutscene);
+
+void cutsceneCheckTriggers(struct Vector3* playerPos);
+
+void cutsceneSerialize(struct CutsceneRunner* runner, struct CutsceneSerialized* result);
+void cutsceneStartSerialized(struct CutsceneSerialized* serialized);
+
+void cutsceneSerializeWrite(struct Serializer* serializer, SerializeAction action);
+void cutsceneSerializeRead(struct Serializer* serializer);
+
+int cutsceneRunnerIsChannelPlaying(int channel);
+void cutsceneQueueSoundInChannel(int soundId, float volume, int channel);
 
 #endif

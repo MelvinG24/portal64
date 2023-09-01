@@ -7,17 +7,28 @@
 
 #define NO_BONE_PARENT      0xFFFF
 
-struct SKArmature {
+struct SKArmatureDefinition {
     Gfx* displayList;
-    struct Transform* boneTransforms;
-    u32 numberOfBones;
+    struct Transform* pose;
     unsigned short* boneParentIndex;
+    u16 numberOfBones;
+    u16 numberOfAttachments;
 };
 
-void skArmatureInit(struct SKArmature* object, Gfx* displayList, u32 numberOfBones, struct Transform* initialPose, unsigned short* boneParentIndex);
-void skRenderObject(struct SKArmature* object, struct RenderState* intoState);
+struct SKArmature {
+    Gfx* displayList;
+    struct Transform* pose;
+    unsigned short* boneParentIndex;
+    u16 numberOfBones;
+    u16 numberOfAttachments;
+};
+
+void skArmatureInit(struct SKArmature* object, struct SKArmatureDefinition* definition);
+Gfx* skBuildAttachments(struct SKArmature* object, Gfx** attachments, struct RenderState* renderState);
+void skRenderObject(struct SKArmature* object, Gfx** attachements, struct RenderState* intoState);
 void skCalculateTransforms(struct SKArmature* object, Mtx* into);
 void skCleanupObject(struct SKArmature* object);
 void skCalculateBonePosition(struct SKArmature* object, unsigned short boneIndex, struct Vector3* bonePosition, struct Vector3* out);
+void skCalculateBoneRotation(struct SKArmature* object, unsigned short boneIndex, struct Quaternion* out);
 
 #endif

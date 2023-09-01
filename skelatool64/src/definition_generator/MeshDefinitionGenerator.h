@@ -5,6 +5,20 @@
 #include "../DisplayListSettings.h"
 #include "../RenderChunk.h"
 
+struct ArmatureDefinitionResults {
+    std::string modelName;
+    std::string initialPoseReference;
+    std::string boneParentReference;
+    std::string boneCountMacro;
+    std::string numberOfAttachmentMacros;
+};
+
+struct MeshDefinitionResults {
+public:
+    std::string modelName;
+    std::string materialMacro;
+};
+
 class MeshDefinitionGenerator : public DefinitionGenerator {
 public:
     MeshDefinitionGenerator(const DisplayListSettings& settings);
@@ -12,7 +26,11 @@ public:
     virtual bool ShouldIncludeNode(aiNode* node);
     virtual void GenerateDefinitions(const aiScene* scene, CFileDefinition& fileDefinition);
 
-    static void AppendRenderChunks(const aiScene* scene, aiNode* node, CFileDefinition& fileDefinition, DisplayListSettings& settings, std::vector<RenderChunk>& renderChunks);
+    void PopulateBones(const aiScene* scene, CFileDefinition& fileDefinition);
+
+    MeshDefinitionResults GenerateDefinitionsWithResults(const aiScene* scene, CFileDefinition& fileDefinition);
+
+    static void AppendRenderChunks(const aiScene* scene, aiNode* node, CFileDefinition& fileDefinition, const DisplayListSettings& settings, std::vector<RenderChunk>& renderChunks);
 private:
     DisplayListSettings mSettings;
 };

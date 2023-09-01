@@ -11,7 +11,7 @@
 #include "../physics/collision_quad.h"
 #include "../math/boxs16.h"
 
-#define CLIPPING_PLANE_COUNT    5
+#define MAX_CLIPPING_PLANE_COUNT    6
 
 struct Camera {
     struct Transform transform;
@@ -21,9 +21,16 @@ struct Camera {
 };
 
 struct FrustrumCullingInformation {
-    struct Plane clippingPlanes[CLIPPING_PLANE_COUNT];
+    struct Plane clippingPlanes[MAX_CLIPPING_PLANE_COUNT];
+    short usedClippingPlaneCount;
 
-    struct Vector3 cameraPosScaled;
+    struct Vector3 cameraPos;
+};
+
+struct CameraMatrixInfo {
+    Mtx* projectionView;
+    u16 perspectiveNormalize;
+    struct FrustrumCullingInformation cullingInformation;
 };
 
 int isOutsideFrustrum(struct FrustrumCullingInformation* frustrum, struct BoundingBoxs16* boundingBox);
@@ -33,6 +40,10 @@ int isQuadOutsideFrustrum(struct FrustrumCullingInformation* frustrum, struct Co
 void cameraInit(struct Camera* camera, float fov, float near, float far);
 void cameraBuildViewMatrix(struct Camera* camera, float matrix[4][4]);
 void cameraBuildProjectionMatrix(struct Camera* camera, float matrix[4][4], u16* perspectiveNorm, float aspectRatio);
-Mtx* cameraSetupMatrices(struct Camera* camera, struct RenderState* renderState, float aspectRatio, u16* perspNorm, Vp* viewport, struct FrustrumCullingInformation* clippingInfo, float zBias);
+int cameraSetupMatrices(struct Camera* camera, struct RenderState* renderState, float aspectRatio, Vp* viewport, int extractClippingPlanes, struct CameraMatrixInfo* output);
+
+int cameraApplyMatrices(struct RenderState* renderState, struct CameraMatrixInfo* matrixInfo);
+
+float cameraClipDistance(struct Camera* camera, float distance);
 
 #endif

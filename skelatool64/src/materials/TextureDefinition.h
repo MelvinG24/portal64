@@ -3,11 +3,14 @@
 
 #include <vector>
 #include <inttypes.h>
+#include <memory>
 
 #include "TextureFormats.h"
 
 #include "../definitions/DataChunk.h"
 #include "../definitions/FileDefinition.h"
+
+class CImgu8;
 
 class DataChunkStream {
 public:
@@ -55,11 +58,37 @@ struct PixelIAu8 {
 
 enum class TextureDefinitionEffect {
     TwoToneGrayscale = (1 << 0),
+    NormalMap = (1 << 1),
+    Invert = (1 << 2),
+    SelectR = (1 << 3),
+    SelectG = (1 << 4),
+    SelectB = (1 << 5),
+};
+
+class PalleteDefinition {
+public:
+    PalleteDefinition(const std::string& filename);
+
+    PixelIu8 FindIndex(PixelRGBAu8 color) const;
+
+    std::unique_ptr<FileDefinition> GenerateDefinition(const std::string& name, const std::string& location) const;
+
+    const std::string& Name() const;
+
+    int LoadBlockSize() const;
+    int DTX() const;
+    int NBytes() const;
+    unsigned ColorCount() const;
+private:
+    std::string mName;
+    std::vector<PixelRGBAu8> mColors;
+    std::vector<unsigned long long> mData;
 };
 
 class TextureDefinition {
 public:
-    TextureDefinition(const std::string& filename, G_IM_FMT fmt, G_IM_SIZ siz, TextureDefinitionEffect effects);
+    TextureDefinition(const std::string& filename, G_IM_FMT fmt, G_IM_SIZ siz, TextureDefinitionEffect effects, std::shared_ptr<PalleteDefinition> pallete);
+    ~TextureDefinition();
 
     static void DetermineIdealFormat(const std::string& filename, G_IM_FMT& fmt, G_IM_SIZ& siz);
 
@@ -72,8 +101,12 @@ public:
     G_IM_SIZ Size() const;
 
     bool GetLine(int& line) const;
+    bool GetLineForTile(int& line) const;
     int LoadBlockSize() const;
     int DTX() const;
+    int NBytes() const;
+
+    const std::vector<unsigned long long>& GetData() const;
 
     const std::string& Name() const;
 
@@ -81,13 +114,29 @@ public:
 
     PixelRGBAu8 GetTwoToneMin() const;
     PixelRGBAu8 GetTwoToneMax() const;
+
+    std::shared_ptr<PalleteDefinition> GetPallete() const;
+
+    std::shared_ptr<TextureDefinition> Crop(int x, int y, int w, int h) const;
+    std::shared_ptr<TextureDefinition> Resize(int w, int h) const;
 private:
+    TextureDefinition(
+        CImgu8* mImg,
+        const std::string& name, 
+        G_IM_FMT fmt, 
+        G_IM_SIZ siz, 
+        std::shared_ptr<PalleteDefinition> pallete,
+        TextureDefinitionEffect effects
+    );
+
+    CImgu8* mImg;
     std::string mName;
     G_IM_FMT mFmt;
     G_IM_SIZ mSiz;
     int mWidth;
     int mHeight;
     std::vector<unsigned long long> mData;
+    std::shared_ptr<PalleteDefinition> mPallete;
     TextureDefinitionEffect mEffects;
 
     PixelRGBAu8 mTwoToneMin;

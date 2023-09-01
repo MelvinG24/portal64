@@ -5,16 +5,6 @@
 
 #include <algorithm>
 
-CollisionGenerator::CollisionGenerator(const DisplayListSettings& settings, const RoomGeneratorOutput& roomOutput) : 
-    DefinitionGenerator(), 
-    mSettings(settings),
-    mRoomOutput(roomOutput) {}
-
-
-bool CollisionGenerator::ShouldIncludeNode(aiNode* node) {
-    return StartsWith(node->mName.C_Str(), "@collision");
-}
-
 CollisionGrid::CollisionGrid(const aiAABB& boundaries) {
     x = floor(boundaries.mMin.x);
     z = floor(boundaries.mMin.z);
@@ -39,7 +29,7 @@ void CollisionGrid::AddToCells(const aiAABB& box, short value) {
     if (minX >= spanX) minX = spanX - 1;
 
     if (maxZ < 0) maxZ = 0;
-    if (minX >= spanZ) minZ = spanZ - 1;
+    if (minZ >= spanZ) minZ = spanZ - 1;
 
     for (int currX = minX; currX <= maxX; ++currX) {
         for (int currZ = minZ; currZ <= maxZ; ++currZ) {
@@ -50,12 +40,24 @@ void CollisionGrid::AddToCells(const aiAABB& box, short value) {
     }
 }
 
-void CollisionGenerator::GenerateDefinitions(const aiScene* scene, CFileDefinition& fileDefinition) {
+float parseQuadThickness(NodeWithArguments& nodeInfo) {
+    auto thicknessParameter = nodeInfo.ReadNamedArgument("thickness");
+
+    if (thicknessParameter == "") {
+        return 0.0f;
+    }
+
+    return std::atof(thicknessParameter.c_str());
+}
+
+std::shared_ptr<CollisionGeneratorOutput> generateCollision(const aiScene* scene, CFileDefinition& fileDefinition, const DisplayListSettings& settings, NodeGroups& nodeGroups) {
+    std::shared_ptr<CollisionGeneratorOutput> output(new CollisionGeneratorOutput());
+    
     std::unique_ptr<StructureDataChunk> collidersChunk(new StructureDataChunk());
     std::unique_ptr<StructureDataChunk> colliderTypeChunk(new StructureDataChunk());
     std::unique_ptr<StructureDataChunk> collisionObjectChunk(new StructureDataChunk());
 
-    aiMatrix4x4 globalTransform = mSettings.CreateCollisionTransform();
+    aiMatrix4x4 globalTransform = settings.CreateCollisionTransform();
 
     int meshCount = 0;
 
@@ -63,20 +65,25 @@ void CollisionGenerator::GenerateDefinitions(const aiScene* scene, CFileDefiniti
     std::string colliderTypesName = fileDefinition.GetUniqueName("collider_types");
     std::string collisionObjectsName = fileDefinition.GetUniqueName("collision_objects");
 
-    sortNodesByRoom(mIncludedNodes, mRoomOutput);
+    std::vector<NodeWithArguments> nodes = nodeGroups.NodesForType("@collision");
 
-    std::vector<aiAABB> roomBoxes;
     std::vector<int> quadRooms;
 
-    for (int i = 0; i < mRoomOutput.roomCount; ++i) {
-        roomBoxes.push_back(aiAABB());
-    }
+    for (auto nodeInfo : nodes) {
+        for (unsigned i = 0; i < nodeInfo.node->mNumMeshes; ++i) {
+            aiMesh* mesh = scene->mMeshes[nodeInfo.node->mMeshes[i]];
 
-    for (auto node : mIncludedNodes) {
-        for (unsigned i = 0; i < node->mNumMeshes; ++i) {
-            aiMesh* mesh = scene->mMeshes[node->mMeshes[i]];
+            bool isTransparent = std::find(nodeInfo.arguments.begin(), nodeInfo.arguments.end(), "transparent") != nodeInfo.arguments.end();
 
-            CollisionQuad collider(mesh, globalTransform * node->mTransformation);
+            CollisionQuad collider(mesh, globalTransform * nodeInfo.node->mTransformation);
+            collider.thickness = parseQuadThickness(nodeInfo);
+
+            std::string namedEntry = nodeInfo.ReadNamedArgument("name");
+
+            if (namedEntry != "") {
+                fileDefinition.AddMacro(fileDefinition.GetMacroName(namedEntry + "_COLLISION_INDEX"), std::to_string(output->quads.size()));
+            }
+
             collidersChunk->Add(std::move(collider.Generate()));
 
             std::unique_ptr<StructureDataChunk> colliderType(new StructureDataChunk());
@@ -91,36 +98,16 @@ void CollisionGenerator::GenerateDefinitions(const aiScene* scene, CFileDefiniti
             collisionObject->AddPrimitive(std::string("&" + colliderTypesName + "[" + std::to_string(meshCount) + "]"));
             collisionObject->AddPrimitive<const char*>("NULL");
             collisionObject->Add(std::unique_ptr<DataChunk>(new StructureDataChunk(collider.BoundingBox())));
+            collisionObject->AddPrimitive<const char*>(isTransparent ? 
+                "COLLISION_LAYERS_STATIC | COLLISION_LAYERS_BLOCK_BALL | COLLISION_LAYERS_TRANSPARENT | COLLISION_LAYERS_TANGIBLE" : 
+                "COLLISION_LAYERS_STATIC | COLLISION_LAYERS_BLOCK_BALL | COLLISION_LAYERS_TANGIBLE");
             collisionObjectChunk->Add(std::move(collisionObject));
 
 
-            mOutput.quads.push_back(collider);
-
-            int room = mRoomOutput.RoomForNode(node);
-            quadRooms.push_back(room);
-
-            aiAABB bb = collider.BoundingBox();
-            aiAABB& roomBox = roomBoxes[room];
-            
-            if (roomBox.mMin == roomBox.mMax) {
-                roomBox = bb;
-            } else {
-                roomBox.mMin = min(roomBox.mMin, bb.mMin);
-                roomBox.mMax = max(roomBox.mMax, bb.mMax);
-            }
+            output->quads.push_back(collider);
 
             ++meshCount;
         }
-    }
-
-    for (int i = 0; i < mRoomOutput.roomCount; ++i) {
-        mOutput.roomGrids.push_back(CollisionGrid(roomBoxes[i]));
-    }
-
-    int quadIndex = 0;
-    for (auto& quad : mOutput.quads) {
-        mOutput.roomGrids[quadRooms[quadIndex]].AddToCells(quad.BoundingBox(), quadIndex);
-        quadIndex++;
     }
 
     std::unique_ptr<FileDefinition> collisionFileDef(new DataFileDefinition(
@@ -155,9 +142,36 @@ void CollisionGenerator::GenerateDefinitions(const aiScene* scene, CFileDefiniti
 
     fileDefinition.AddMacro(fileDefinition.GetMacroName("QUAD_COLLIDERS_COUNT"), std::to_string(meshCount));
 
-    mOutput.quadsName = collisionObjectsName;
+    output->quadsName = collisionObjectsName;
+
+    return output;
 }
 
-const CollisionGeneratorOutput& CollisionGenerator::GetOutput() const {
-    return mOutput;
+void generateMeshCollider(CFileDefinition& fileDefinition, CollisionGeneratorOutput& collisionOutput) {
+    std::unique_ptr<StructureDataChunk> meshColliderChunk(new StructureDataChunk());
+
+    meshColliderChunk->AddPrimitive(collisionOutput.quadsName);
+    meshColliderChunk->AddPrimitive(collisionOutput.quads.size());
+    
+    aiAABB colliderbox;
+
+    if (collisionOutput.quads.size()) {
+        colliderbox = collisionOutput.quads[0].BoundingBox();
+
+        for (std::size_t i = 1; i < collisionOutput.quads.size(); ++i) {
+            aiAABB quadBox = collisionOutput.quads[i].BoundingBox();
+            colliderbox.mMin = min(quadBox.mMin, colliderbox.mMin);
+            colliderbox.mMax = max(quadBox.mMax, colliderbox.mMax);
+        }
+    }
+
+    meshColliderChunk->Add(std::unique_ptr<DataChunk>(new StructureDataChunk((colliderbox.mMax + colliderbox.mMin) * 0.5f)));
+    aiVector3D halfSize = (colliderbox.mMax - colliderbox.mMin) * 0.5f;
+    meshColliderChunk->Add(std::unique_ptr<DataChunk>(new StructureDataChunk(halfSize)));
+    meshColliderChunk->AddPrimitive(halfSize.Length());
+
+    std::string colliderName = fileDefinition.GetUniqueName("collider");
+    std::unique_ptr<FileDefinition> definition(new DataFileDefinition("struct MeshCollider", colliderName, false, "_geo", std::move(meshColliderChunk)));
+    definition->AddTypeHeader("\"physics/mesh_collider.h\"");
+    fileDefinition.AddDefinition(std::move(definition));
 }

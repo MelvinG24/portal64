@@ -62,11 +62,8 @@ int raycastBox(struct CollisionObject* boxObject, struct Ray* ray, float maxDist
         return 0;
     }
 
-    struct Transform boxInverse;
-    transformInvert(&boxObject->body->transform, &boxInverse);
-
     struct Ray localRay;
-    rayTransform(&boxInverse, ray, &localRay);
+    collisionObjectLocalRay(boxObject, ray, &localRay);
 
     contact->distance = maxDistance;
 
@@ -76,20 +73,16 @@ int raycastBox(struct CollisionObject* boxObject, struct Ray* ray, float maxDist
         // d = -(o * N + d) / (N * D)
 
         float dir = VECTOR3_AS_ARRAY(&localRay.dir)[i];
-        
-        float denominator = fabsf(dir);
 
-        if (denominator < NEAR_DOT_ZERO) {
+        if (fabsf(dir) < NEAR_DOT_ZERO) {
             continue;
         }
 
-        float numerator = VECTOR3_AS_ARRAY(&localRay.origin)[i] - VECTOR3_AS_ARRAY(&box->sideLength)[i];
-
-        if (dir > 0) {
-            numerator = -numerator;
+        if (dir > 0.0f) {
+            hitTest.distance = -(VECTOR3_AS_ARRAY(&localRay.origin)[i] + VECTOR3_AS_ARRAY(&box->sideLength)[i]) / dir;
+        } else {
+            hitTest.distance = -(VECTOR3_AS_ARRAY(&localRay.origin)[i] - VECTOR3_AS_ARRAY(&box->sideLength)[i]) / dir;
         }
-
-        hitTest.distance = numerator / denominator;
 
         // check if hit is within valid bounds
         if (hitTest.distance < MIN_RAY_LENGTH || hitTest.distance > contact->distance) {
@@ -120,48 +113,4 @@ int raycastBox(struct CollisionObject* boxObject, struct Ray* ray, float maxDist
     contact->roomIndex = boxObject->body->currentRoom;
 
     return contact->distance != maxDistance;
-}
-
-int raycastCylinder(struct CollisionObject* cylinderObject, struct Ray* ray, float maxDistance, struct RaycastHit* contact) {
-    struct CollisionCylinder* cylinder = (struct CollisionCylinder*)cylinderObject->collider->data;
-
-    float distance = rayDetermineDistance(ray, &cylinderObject->body->transform.position);
-
-    if (distance < 0.0f) {
-        return 0;
-    }
-    
-    float rayLerp;
-    float cylinderLerp;
-
-    struct Vector3 up;
-    quatMultVector(&cylinderObject->body->transform.rotation, &gUp, &up);
-
-    if (lineNearestApproach(&ray->origin, &ray->dir, &cylinderObject->body->transform.position, &up, &rayLerp, &cylinderLerp)) {
-        if (cylinderLerp < -cylinder->halfHeight || cylinderLerp > cylinder->halfHeight || rayLerp > maxDistance) {
-            return 0;
-        }
-
-        struct Vector3 nearPoint;
-        vector3AddScaled(&ray->origin, &ray->dir, rayLerp, &nearPoint);
-        
-        struct Vector3 cylinderPoint;
-        vector3AddScaled(&cylinderObject->body->transform.position, &up, cylinderLerp, &cylinderPoint);
-
-        if (vector3DistSqrd(&nearPoint, &cylinderPoint) > cylinder->radius * cylinder->radius) {
-            return 0;
-        }
-
-        // good enough for now
-        // TODO check collision on cylinder surface
-        // TODO check collision on cylinder caps
-        contact->at = nearPoint;
-        contact->distance = rayLerp;
-        vector3Negate(&ray->dir, &contact->normal);
-        contact->object = cylinderObject;
-
-        return 1;
-    }
-
-    return 0;
 }

@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <assimp/postprocess.h>
 
 #include "src/SceneWriter.h"
 #include "src/CommandLineParser.h"
@@ -18,10 +19,10 @@
 #include "src/definition_generator/MeshDefinitionGenerator.h"
 #include "src/definition_generator/CollisionGenerator.h"
 #include "src/definition_generator/MaterialGenerator.h"
-#include "src/definition_generator/StaticGenerator.h"
-#include "src/definition_generator/LevelGenerator.h"
-#include "src/definition_generator/TriggerGenerator.h"
 #include "src/materials/MaterialState.h"
+#include "src/materials/MaterialTranslator.h"
+#include "src/StringUtils.h"
+#include "src/lua_generator/LuaGenerator.h"
 
 void handler(int sig) {
   void *array[10];
@@ -41,6 +42,8 @@ bool parseMaterials(const std::string& filename, DisplayListSettings& output) {
     std::fstream file(filename, std::ios::in);
 
     struct ParseResult parseResult(DirectoryName(filename));
+    parseResult.mForcePallete = output.mForcePallete;
+    parseResult.mTargetCIBuffer = output.mTargetCIBuffer;
     parseMaterialFile(file, parseResult);
     output.mMaterials.insert(parseResult.mMaterialFile.mMaterials.begin(), parseResult.mMaterialFile.mMaterials.end());
 
@@ -98,18 +101,33 @@ int main(int argc, char *argv[]) {
 
     DisplayListSettings settings = DisplayListSettings();
 
-    settings.mGraphicsScale = args.mGraphicsScale;
-    settings.mCollisionScale = args.mCollisionScale;
+    settings.mFixedPointScale = args.mFixedPointScale;
+    settings.mModelScale = args.mModelScale;
     settings.mRotateModel = getUpRotation(args.mEulerAngles);
     settings.mPrefix = args.mPrefix;
     settings.mExportAnimation = args.mExportAnimation;
     settings.mExportGeometry = args.mExportGeometry;
+    settings.mBonesAsVertexGroups = args.mBonesAsVertexGroups;
+    settings.mForcePallete = args.mForcePallete;
+    settings.mTargetCIBuffer = args.mTargetCIBuffer;
+    settings.mTicksPerSecond = args.mFPS;
+    settings.mSortDirection = args.mSortDirection;
 
     bool hasError = false;
 
     for (auto materialFile = args.mMaterialFiles.begin(); materialFile != args.mMaterialFiles.end(); ++materialFile) {
-        if (!parseMaterials(*materialFile, settings)) {
-            hasError = true;
+        if (EndsWith(*materialFile, ".yaml") || EndsWith(*materialFile, ".yml") || EndsWith(*materialFile, ".json")) {
+            if (!parseMaterials(*materialFile, settings)) {
+                hasError = true;
+            }
+        } else {
+            aiScene* materialScene = loadScene(*materialFile, false, settings.mVertexCacheSize, 0);
+
+            if (!materialScene) {
+                hasError = true;
+            }
+
+            fillMissingMaterials(gTextureCache, materialScene, settings);
         }
     }
 
@@ -121,77 +139,75 @@ int main(int argc, char *argv[]) {
 
     if (defaultMaterial != settings.mMaterials.end()) {
         settings.mDefaultMaterialState = defaultMaterial->second->mState;
+        settings.mDefaultMaterialName = args.mDefaultMaterial;
+        settings.mForceMaterialName = args.mForceMaterialName;
     }
 
     const aiScene* scene = NULL;
 
+    unsigned int additionalPFlags = 0;
+
+    if (settings.NeedsTangents()) {
+        additionalPFlags |= aiProcess_CalcTangentSpace;
+    }
+
     if (args.mInputFile.length()) {
         std::cout << "Generating from mesh "  << args.mInputFile << std::endl;
-        scene = loadScene(args.mInputFile, args.mIsLevel, settings.mVertexCacheSize);
+        scene = loadScene(args.mInputFile, args.mProcessAsModel || args.mOutputType != FileOutputType::Mesh, settings.mVertexCacheSize, additionalPFlags);
 
         if (!scene) {
             return 1;
         }
+
+        fillMissingMaterials(gTextureCache, scene, settings);
     }
 
-    if (scene && args.mOutputFile.length()) {    
-        std::cout << "Saving to "  << args.mOutputFile << std::endl;
-        // generateMeshFromSceneToFile(scene, args.mOutputFile, settings);
+    std::cout << "Saving to "  << args.mOutputFile << std::endl;
+    CFileDefinition fileDef(settings.mPrefix, settings.mFixedPointScale, settings.mModelScale, settings.mRotateModel);
 
-        MeshDefinitionGenerator meshGenerator(settings);
-
-        std::cout << "Generating mesh definitions" << std::endl;
-        meshGenerator.TraverseScene(scene);
-        CFileDefinition fileDef(settings.mPrefix, settings.mGraphicsScale, settings.mRotateModel);
-        meshGenerator.GenerateDefinitions(scene, fileDef);
-
-
-        if (args.mIsLevel) {
-            std::cout << "Grouping objects by room" << std::endl;
-            RoomGenerator roomGenerator(settings);
-            roomGenerator.TraverseScene(scene);
-            roomGenerator.GenerateDefinitions(scene, fileDef);
-
-            std::cout << "Generating collider definitions" << std::endl;
-            CollisionGenerator colliderGenerator(settings, roomGenerator.GetOutput());
-            colliderGenerator.TraverseScene(scene);
-            colliderGenerator.GenerateDefinitions(scene, fileDef);
-
-            std::cout << "Generating static definitions" << std::endl;
-            StaticGenerator staticGenerator(settings, roomGenerator.GetOutput());
-            staticGenerator.TraverseScene(scene);
-            staticGenerator.GenerateDefinitions(scene, fileDef);
-
-            TriggerGenerator triggerGenerator(settings, roomGenerator.GetOutput());
-            triggerGenerator.TraverseScene(scene);
-            triggerGenerator.GenerateDefinitions(scene, fileDef);
-
-            std::cout << "Generating level definitions" << std::endl;
-            LevelGenerator levelGenerator(
-                settings, 
-                staticGenerator.GetOutput(), 
-                colliderGenerator.GetOutput(),
-                triggerGenerator.GetOutput(),
-                roomGenerator.GetOutput()
-            );
-            levelGenerator.GenerateDefinitions(scene, fileDef);
+    switch (args.mOutputType)
+    {
+        case FileOutputType::Mesh:
+        {
+            MeshDefinitionGenerator meshGenerator(settings);
+            std::cout << "Generating mesh definitions" << std::endl;
+            meshGenerator.TraverseScene(scene);
+            meshGenerator.PopulateBones(scene, fileDef);
+            meshGenerator.GenerateDefinitions(scene, fileDef);
+            break;
         }
+        case FileOutputType::Materials:
+        {
+            std::cout << "Saving materials to "  << args.mOutputFile << std::endl;
 
-        std::cout << "Writing output" << std::endl;
-        fileDef.GenerateAll(args.mOutputFile);
+            MaterialGenerator materialGenerator(settings);
+
+            materialGenerator.TraverseScene(scene);
+            materialGenerator.GenerateDefinitions(scene, fileDef);
+            break;
+        }
+        case FileOutputType::CollisionMesh:
+        {
+            NodeGroups nodesByGroup(scene);
+            std::cout << "Generating collider definitions" << std::endl;
+            auto collisionOutput = generateCollision(scene, fileDef, settings, nodesByGroup);
+            generateMeshCollider(fileDef, *collisionOutput);
+            break;
+        }
+        case FileOutputType::Script:
+        {
+            NodeGroups nodesByGroup(scene);
+
+            for (auto script : args.mScriptFiles) {
+                std::cout << "Generating definitions from script " << script << std::endl;
+                generateFromLuaScript(args.mInputFile, script, scene, fileDef, nodesByGroup, settings);
+            }
+            break;
+        }
     }
 
-    if (args.mMaterialOutput.length()) {
-        std::cout << "Saving materials to "  << args.mMaterialOutput << std::endl;
-
-        MaterialGenerator materialGenerator(settings);
-
-        materialGenerator.TraverseScene(scene);
-        CFileDefinition fileDef(settings.mPrefix, settings.mGraphicsScale, settings.mRotateModel);
-        materialGenerator.GenerateDefinitions(scene, fileDef);
-
-        fileDef.GenerateAll(args.mMaterialOutput);
-    }
+    std::cout << "Writing output" << std::endl;
+    fileDef.GenerateAll(args.mOutputFile);
     
     return 0;
 }

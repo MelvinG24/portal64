@@ -23,13 +23,14 @@ void vector2ComplexFromAngle(float radians, struct Vector2* out) {
     out->y = sinf(radians);
 }
 
-void vector2RotateTowards(struct Vector2* from, struct Vector2* towards, struct Vector2* max, struct Vector2* out) {
+int vector2RotateTowards(struct Vector2* from, struct Vector2* towards, struct Vector2* max, struct Vector2* out) {
     struct Vector2 fromInv = {from->x, -from->y};
     struct Vector2 diff;
     vector2ComplexMul(&fromInv, towards, &diff);
 
     if (diff.x > max->x) {
         *out = *towards;
+        return 1;
     } else {
         if (diff.y < 0) {
             diff.x = max->x;
@@ -38,6 +39,8 @@ void vector2RotateTowards(struct Vector2* from, struct Vector2* towards, struct 
             diff = *max;
         }
         vector2ComplexMul(from, &diff, out);
+
+        return 0;
     }
 }
 
@@ -113,4 +116,9 @@ void vector2Min(struct Vector2* a, struct Vector2* b, struct Vector2* out) {
 void vector2Max(struct Vector2* a, struct Vector2* b, struct Vector2* out) {
     out->x = maxf(a->x, b->x);
     out->y = maxf(a->y, b->y);
+}
+
+void vector2Lerp(struct Vector2* a, struct Vector2* b, float lerp, struct Vector2* out) {
+    out->x = (b->x - a->x) * lerp + a->x;
+    out->y = (b->y - a->y) * lerp + a->y;
 }
